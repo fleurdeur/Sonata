@@ -1,26 +1,17 @@
 package com.sonata.feature.mix
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -30,23 +21,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sonata.core.designsystem.LocalRadius
+import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalSpacing
-import com.sonata.core.designsystem.components.glassSurface
-import com.sonata.core.domain.model.MusicalKey
-import com.sonata.core.domain.model.TransitionCurve
-import com.sonata.core.domain.model.TransitionType
-import com.sonata.core.domain.repository.MixRepository
+import com.sonata.core.designsystem.components.EmptyState
+import com.sonata.core.designsystem.components.ScreenHeader
+import com.sonata.core.designsystem.components.SoundRow
+import com.sonata.core.designsystem.components.formatDuration
+import com.sonata.core.domain.model.Sound
 import com.sonata.core.domain.repository.SoundRepository
+import com.sonata.core.media.connection.PlayerConnection
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlin.math.abs
+import kotlin.math.min
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -54,214 +45,135 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class MixViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
-    private val mixRepository: MixRepository,
+    private val player: PlayerConnection,
 ) : ViewModel() {
 
     val sounds = soundRepository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    fun autoOrder(playlistId: Long, onDone: () -> Unit = {}) = viewModelScope.launch {
-        mixRepository.autoOrder(playlistId)
-        onDone()
+    fun play(order: List<Sound>, index: Int = 0) = viewModelScope.launch {
+        if (order.isEmpty()) return@launch
+        player.play(order, index)
+        soundRepository.incrementPlayCount(order[index].id)
     }
 }
 
+/**
+ * Harmonic mixing without new machinery: the library is ordered so each track
+ * is close in tempo (within a few BPM) and compatible in Camelot key with the
+ * one before it. That order is the mix; playing it is one button.
+ */
 @Composable
-fun MixScreen(
-    onOpenSampler: () -> Unit,
-    viewModel: MixViewModel = hiltViewModel(),
-) {
+fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
     val sounds by viewModel.sounds.collectAsState()
     val spacing = LocalSpacing.current
-    var selectedTransition by remember { mutableStateOf<TransitionType?>(null) }
+    var seedId by remember { mutableStateOf<Long?>(null) }
 
-    Column(
+    val order = remember(sounds, seedId) { harmonicOrder(sounds, seedId) }
+
+    LazyColumn(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.mdDp),
-        verticalArrangement = Arrangement.spacedBy(spacing.mdDp),
+        contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(
-            "Mix",
-            style = MaterialTheme.typography.displayLarge,
-            modifier = Modifier.padding(top = spacing.lgDp),
-        )
-        MixLandingCard("Your mixes", "Transitions saved from playlists and queues")
-        MixLandingCard("Auto-Mix", "Continuously mix the whole library by BPM and key")
-        MixLandingCard("Remix Radio", "Brain-powered radio from your own sounds")
-        MixLandingCard("Remix Lab", "Apply Slowed + Reverb, Nightcore and more as new versions")
-
-        Text("Track strip", style = MaterialTheme.typography.headlineMedium)
-        // Horizontal waveform blocks with BPM and key badges and transition nodes.
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(spacing.smDp)) {
-            sounds.take(8).forEachIndexed { index, sound ->
-                item {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .size(width = 120.dp, height = 56.dp)
-                                    
-                                    .glassSurface(),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                WaveformStrip(sound.waveform.take(24))
-                            }
-                            if (index < 7) {
-                                Text(
-                                    "⇄",
-                                    Modifier
-                                        .clickable { selectedTransition = TransitionType.AUTO }
-                                        .padding(horizontal = 6.dp),
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            sound.bpm?.let { Badge("$it BPM") }
-                            sound.key?.let { Badge(it.camelot) }
-                        }
-                    }
-                }
-            }
-        }
-
-        Text("Sampler", style = MaterialTheme.typography.headlineMedium)
-        SamplerGrid()
-
-        if (selectedTransition != null) {
-            TransitionSheet(
-                selected = selectedTransition!!,
-                onSelect = { selectedTransition = it },
-                onDismiss = { selectedTransition = null },
+        item {
+            ScreenHeader(
+                title = "Mix",
+                subtitle = if (sounds.size < 2) "Add sounds to build a mix" else "${sounds.size} sounds in harmonic order",
             )
         }
-    }
-}
-
-
-@Composable
-private fun MixLandingCard(title: String, subtitle: String) {
-    Surface(
-        Modifier
-            .fillMaxWidth()
-            .clickable { },
-        shape = LocalRadius.current.mdShape,
-    ) {
-        Column(
-            Modifier
-                .glassSurface()
-                .padding(LocalSpacing.current.mdDp),
-        ) {
-            Text(title, style = MaterialTheme.typography.titleLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun WaveformStrip(peaks: List<Float>) {
-    Canvas(Modifier.size(width = 104.dp, height = 40.dp)) {
-        if (peaks.isEmpty()) return@Canvas
-        val barWidth = size.width / peaks.size
-        peaks.forEachIndexed { i, peak ->
-            val h = (peak.coerceIn(0f, 1f) * size.height).coerceAtLeast(2f)
-            drawRect(
-                color = Color(0xFF6C5CE7),
-                topLeft = androidx.compose.ui.geometry.Offset(i * barWidth, (size.height - h) / 2),
-                size = androidx.compose.ui.geometry.Size(barWidth * 0.7f, h),
-            )
-        }
-    }
-}
-
-@Composable
-private fun Badge(text: String) {
-    Text(
-        text,
-        Modifier
-                        .glassSurface(blurDp = 6, shape = LocalRadius.current.pillShape)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        style = MaterialTheme.typography.labelSmall,
-    )
-}
-
-@Composable
-private fun TransitionSheet(
-    selected: TransitionType,
-    onSelect: (TransitionType) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var length by remember { mutableStateOf(4f) }
-    var intensity by remember { mutableStateOf(0.7f) }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .glassSurface()
-            .padding(LocalSpacing.current.mdDp),
-        verticalArrangement = Arrangement.spacedBy(LocalSpacing.current.smDp),
-    ) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(LocalSpacing.current.smDp),
-        ) {
-            TransitionType.entries.forEach { type ->
-                FilterChip(
-                    selected = type == selected,
-                    onClick = { onSelect(type) },
-                    label = { Text(type.label) },
+        item {
+            Column(Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { viewModel.play(order) },
+                    enabled = order.isNotEmpty(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                ) { Text("Play the mix") }
+                Text(
+                    "Each next track is chosen for a small tempo step and a compatible Camelot key, so transitions stay smooth.",
+                    Modifier.padding(top = spacing.smDp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        Text("Length: ${"%.1f".format(length)} s")
-        androidx.compose.material3.Slider(
-            value = length,
-            onValueChange = { length = it },
-            valueRange = 0.5f..12f,
-            modifier = Modifier.semantics { contentDescription = "Transition length" },
-        )
-        Text("Intensity: ${"%d".format((intensity * 100).toInt())}%")
-        androidx.compose.material3.Slider(
-            value = intensity,
-            onValueChange = { intensity = it },
-            modifier = Modifier.semantics { contentDescription = "Transition intensity" },
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(LocalSpacing.current.smDp)) {
-            androidx.compose.material3.OutlinedButton(
-                onClick = onDismiss,
-                modifier = Modifier.semantics { contentDescription = "Close transition editor" },
-            ) { Text("Preview join") }
-            androidx.compose.material3.Button(
-                onClick = onDismiss,
-                modifier = Modifier.semantics { contentDescription = "Save transition" },
-            ) { Text("Save") }
+        if (sounds.size < 2) {
+            item {
+                EmptyState(
+                    title = "Not enough sounds",
+                    message = "A mix needs at least two tracks. Import a few from TikTok or your files.",
+                )
+            }
+        } else {
+            items(order, key = { it.id }) { sound ->
+                SoundRow(
+                    sound = sound,
+                    onPlay = { viewModel.play(order, order.indexOf(sound)) },
+                    onClick = {
+                        // Re-seed the path so the mix starts from this track.
+                        seedId = sound.id
+                        viewModel.play(harmonicOrder(sounds, sound.id), 0)
+                    },
+                    trailing = {
+                        Text(
+                            "${sound.bpm ?: 0} · ${sound.key?.camelot ?: "--"}",
+                            Modifier.padding(end = spacing.smDp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                )
+            }
         }
     }
 }
 
-@Composable
-private fun SamplerGrid() {
-    val pads = (1..16).map { it }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        pads.chunked(4).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                row.forEach { pad ->
-                    Box(
-                        Modifier
-                            .size(72.dp)
-                                                        .glassSurface(blurDp = 8)
-                            .clickable { },
-                            contentAlignment = Alignment.Center,
-                    ) {
-                        Text("$pad", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-        }
+/**
+ * Greedy harmonic path: start from the most played track (or [seedId]),
+ * then always pick the closest remaining track in tempo and key.
+ */
+internal fun harmonicOrder(sounds: List<Sound>, seedId: Long? = null): List<Sound> {
+    if (sounds.size < 2) return sounds
+    val remaining = sounds.toMutableList()
+    val start = remaining.firstOrNull { it.id == seedId }
+        ?: remaining.maxByOrNull { it.playCount }
+        ?: remaining.first()
+    val ordered = mutableListOf(start)
+    remaining.remove(start)
+    while (remaining.isNotEmpty()) {
+        val last = ordered.last()
+        val next = remaining.minBy { candidate -> harmonicDistance(last, candidate) }
+        ordered += next
+        remaining.remove(next)
     }
+    return ordered
+}
+
+private fun harmonicDistance(a: Sound, b: Sound): Int {
+    val bpmA = a.bpm ?: 0
+    val bpmB = b.bpm ?: 0
+    val tempo = if (bpmA > 0 && bpmB > 0) min(abs(bpmA - bpmB) / 4, 12) else 6
+    val key = camelotDistance(a.key?.camelot, b.key?.camelot)
+    // Prefer same-ish tempo first, then compatible keys; duration breaks ties.
+    return tempo * 4 + key * 3 + if (b.durationMs > 0 && a.durationMs > 0) {
+        (abs(b.durationMs - a.durationMs) / 60_000).toInt()
+    } else {
+        0
+    }
+}
+
+/** Camelot wheel distance: 0 for the same key, 1 for one step or a mode change. */
+internal fun camelotDistance(a: String?, b: String?): Int {
+    if (a == null || b == null) return 3
+    val numberA = a.takeWhile { it.isDigit() }.toIntOrNull() ?: return 3
+    val numberB = b.takeWhile { it.isDigit() }.toIntOrNull() ?: return 3
+    val letterA = a.lastOrNull()
+    val letterB = b.lastOrNull()
+    val steps = abs(numberA - numberB)
+    val wheel = min(steps, 12 - steps)
+    return wheel + if (letterA == letterB) 0 else 1
 }

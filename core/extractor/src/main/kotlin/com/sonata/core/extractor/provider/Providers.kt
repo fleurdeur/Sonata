@@ -6,6 +6,8 @@ import com.sonata.core.domain.model.SearchResult
 import com.sonata.core.domain.model.StreamingProvider
 import com.sonata.core.extractor.bitchord.BitchordExtractor
 import com.sonata.core.extractor.bitchord.ResolveOutcome
+import com.sonata.core.extractor.tiktok.TikTokApi
+import com.sonata.core.extractor.tiktok.TikTokUrls
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -112,18 +114,46 @@ class YouTubeLinkResolver @Inject constructor(
     }
 }
 
-/** Registry that keeps resolvers pluggable (YouTube, Bandcamp, direct links...). */
+/**
+ * TikTok share links. The actual import is handled by the worker's TikTok
+ * pipeline (it needs the music metadata as well as the video), but registering
+ * the resolver keeps every link entry point consistent.
+ */
+@Singleton
+class TikTokLinkResolver @Inject constructor(
+    private val api: TikTokApi,
+) : LinkResolver {
+
+    override fun canHandle(url: String): Boolean = TikTokUrls.isTikTok(url)
+
+    override suspend fun resolve(url: String, onProgress: (Float, String) -> Unit): ResolvedLink {
+        val video = api.resolve(url) { fraction, label -> onProgress(fraction, label) }
+        val media = video.videoUrl
+            ?: throw IllegalStateException("TikTok did not expose this video's audio")
+        return ResolvedLink(
+            title = video.displayTitle,
+            author = video.displayArtist,
+            audioUrl = media,
+            durationMs = video.durationMs,
+            coverUrl = video.coverUrl,
+        )
+    }
+}
+
+/** Registry that keeps resolvers pluggable (TikTok, YouTube, direct links...). */
 @Singleton
 class LinkResolverRegistry @Inject constructor(
+    private val tiktok: TikTokLinkResolver,
     private val youtube: YouTubeLinkResolver,
+    private val direct: DirectAudioResolver,
 ) {
-    val resolvers: List<LinkResolver> get() = listOf(youtube, DirectAudioResolver())
+    val resolvers: List<LinkResolver> get() = listOf(tiktok, youtube, direct)
 
     fun forUrl(url: String): LinkResolver? = resolvers.firstOrNull { it.canHandle(url) }
 }
 
 /** Any direct audio file URL. */
-class DirectAudioResolver : LinkResolver {
+class DirectAudioResolver @Inject constructor() : LinkResolver {
     override fun canHandle(url: String): Boolean =
         url.startsWith("http") && listOf(".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav")
             .any { url.substringBefore('?').endsWith(it) }

@@ -5,16 +5,13 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
 import com.sonata.core.designsystem.SonataTheme
-import com.sonata.core.domain.repository.ThemeMode
 import com.sonata.core.domain.repository.SettingsRepository
+import com.sonata.core.extractor.tiktok.TikTokUrls
 import com.sonata.core.work.pipeline.ImportQueue
-import com.sonata.core.work.pipeline.ImportWorker
 import dagger.hilt.android.AndroidEntryPoint
 import java.io.File
 import javax.inject.Inject
@@ -26,8 +23,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The single activity. Handles every share-sheet entry point
- * (ACTION_SEND / ACTION_SEND_MULTIPLE) by enqueuing imports before the UI.
+ * The single activity. Every share-sheet entry point is enqueued here, before
+ * the UI exists, so a share works even when Sonata is cold-started:
+ *
+ * - text/plain: the first URL in the text (TikTok share text is a sentence),
+ * - video or audio streams: snapshotted into the app cache while the URI grant
+ *   is still valid, then imported by the worker,
+ * - images: the same, so a screenshot never becomes a broken row.
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -40,7 +42,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handleIntent(intent)
+        // A recreated activity receives the same intent again; importing it a
+        // second time would duplicate every share.
+        if (savedInstanceState == null) handleIntent(intent)
         lifecycleScope.launch {
             val settings = settingsRepository.settings
             setContent {
@@ -71,49 +75,73 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun doHandleIntent(intent: Intent?) {
-        android.util.Log.i(TAG, "intent action=${intent?.action} type=${intent?.type}")
-        if (intent?.action == Intent.ACTION_SEND) {
-            when (intent.type) {
-                "text/plain" -> intent.getStringExtra(Intent.EXTRA_TEXT)?.let { link ->
-                    android.util.Log.i(TAG, "enqueue link $link")
-                    lifecycleScope.launch { runEnqueue(link, isLink = true) }
-                }
-                else -> {
-                    val stream = androidx.core.content.IntentCompat.getParcelableExtra(
-                        intent,
-                        Intent.EXTRA_STREAM,
-                        android.net.Uri::class.java,
-                    )
-                    android.util.Log.i(TAG, "stream=$stream")
-                    stream?.let { uri ->
-                        lifecycleScope.launch { enqueueLocal(uri.toString(), isLink = false) }
+        if (intent == null) return
+        android.util.Log.i(TAG, "intent action=${intent.action} type=${intent.type}")
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                val stream = androidx.core.content.IntentCompat.getParcelableExtra(
+                    intent,
+                    Intent.EXTRA_STREAM,
+                    Uri::class.java,
+                )
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+                if (stream != null) {
+                    val mime = intent.type.orEmpty()
+                    val kind = if (mime.startsWith("video/") || mime.startsWith("image/")) "Video" else "Sound"
+                    lifecycleScope.launch { enqueueLocal(stream.toString(), kind) }
+                } else if (!text.isNullOrBlank()) {
+                    val url = TikTokUrls.firstUrlIn(text)
+                    if (url != null) {
+                        lifecycleScope.launch { enqueueLink(url) }
+                    } else {
+                        android.widget.Toast.makeText(this, "No link found in that share", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
             }
-        }
-        if (intent?.action == Intent.ACTION_SEND_MULTIPLE) {
-            val uris = androidx.core.content.IntentCompat.getParcelableArrayListExtra(
-                intent,
-                Intent.EXTRA_STREAM,
-                android.net.Uri::class.java,
-            ) ?: emptyList()
-            lifecycleScope.launch {
-                uris.forEach { enqueueLocal(it.toString(), isLink = false) }
+
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris = androidx.core.content.IntentCompat.getParcelableArrayListExtra(
+                    intent,
+                    Intent.EXTRA_STREAM,
+                    Uri::class.java,
+                ) ?: emptyList()
+                lifecycleScope.launch {
+                    uris.forEach { enqueueLocal(it.toString(), "Sound") }
+                }
             }
         }
     }
 
-    private suspend fun runEnqueue(source: String, isLink: Boolean) {
-        runCatching { importQueue.enqueue(source, isLink = isLink) }
-            .onFailure { android.util.Log.e(TAG, "enqueue failed", it) }
-            .onSuccess { android.util.Log.i(TAG, "enqueued ok: $source") }
+    private suspend fun enqueueLink(url: String) {
+        runCatching { importQueue.enqueue(url, isLink = true, title = titleFor(url)) }
+            .onSuccess { _pendingShare.value = listOf(titleFor(url)) }
+            .onFailure {
+                android.util.Log.e(TAG, "enqueue failed", it)
+                showError(it)
+            }
     }
 
+    private suspend fun enqueueLocal(source: String, kind: String) {
+        runCatching {
+            val local = snapshotUri(source)
+            importQueue.enqueue(local, isLink = false, title = kind)
+            _pendingShare.value = listOf(kind)
+        }.onFailure {
+            android.util.Log.e(TAG, "enqueue failed", it)
+            showError(it)
+        }
+    }
+
+    private fun showError(t: Throwable) {
+        android.widget.Toast.makeText(this, "Could not start the import", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun titleFor(url: String): String =
+        if (TikTokUrls.isTikTok(url)) "TikTok video" else "Shared link"
+
     /**
-     * Share-sheet and media-provider grants only cover this activity's process, so a
-     * background ImportWorker cannot reopen the URI later. Snapshot every content URI
-     * into the inbox cache while the grant is still valid, and hand the worker a
-     * local file it can always read.
+     * Share-sheet grants only cover this process, so the worker cannot reopen a
+     * content:// URI later. Copy it into the inbox cache now.
      */
     private suspend fun snapshotUri(source: String): String = withContext(Dispatchers.IO) {
         val uri = Uri.parse(source)
@@ -134,16 +162,8 @@ class MainActivity : ComponentActivity() {
             }
         }.getOrNull() ?: uri.lastPathSegment
         val stamp = System.currentTimeMillis()
-        val safe = (base ?: "sound").replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        val safe = (base ?: "sound").replace(Regex("[\\/:*?\"<>|]"), "_")
         return "$stamp-$safe"
-    }
-
-    private suspend fun enqueueLocal(source: String, isLink: Boolean) {
-        runCatching {
-            val local = if (isLink) source else snapshotUri(source)
-            importQueue.enqueue(local, isLink = isLink)
-        }.onFailure { android.util.Log.e(TAG, "enqueue failed", it) }
-            .onSuccess { android.util.Log.i(TAG, "enqueued ok: $source -> $it") }
     }
 
     private companion object {

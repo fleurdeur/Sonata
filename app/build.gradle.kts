@@ -10,8 +10,8 @@ android {
         applicationId = "com.sonata.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         androidResources.localeFilters += listOf("en")
         vectorDrawables.useSupportLibrary = true
     }
@@ -80,6 +80,8 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.hilt.navigation.compose)
     implementation(libs.compose.material.icons)
+    implementation(libs.coil.compose)
+    implementation(libs.media3.common)
     implementation(libs.work.runtime)
     implementation(libs.hilt.work)
     "ksp"(libs.hilt.work.compiler)

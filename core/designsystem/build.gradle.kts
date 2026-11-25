@@ -9,6 +9,7 @@ dependencies {
     api(project(":core:domain"))
     api(libs.haze)
     implementation(libs.palette.ktx)
+    implementation(libs.coil.compose)
     implementation(libs.compose.material.icons)
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)

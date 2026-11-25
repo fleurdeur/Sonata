@@ -6,4 +6,5 @@ dependencies {
     implementation(project(":core:work"))
     implementation(project(":core:data"))
     implementation(libs.compose.material.icons)
+    implementation(libs.androidx.activity.compose)
 }

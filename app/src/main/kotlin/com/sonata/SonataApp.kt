@@ -1,22 +1,13 @@
 package com.sonata
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,20 +15,26 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,57 +45,65 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalRadius
-import com.sonata.core.designsystem.LocalSpacing
 import com.sonata.core.designsystem.components.LocalHazeState
-import com.sonata.core.designsystem.components.backdropGlass
-import com.sonata.core.designsystem.components.glassSurface
-import com.sonata.core.media.connection.PlayerConnection
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.rememberHazeState
 import dev.chrisbanes.haze.hazeSource
-import dagger.hilt.android.lifecycle.HiltViewModel
-import javax.inject.Inject
-import kotlinx.coroutines.launch
 import com.sonata.core.domain.repository.Settings
+import com.sonata.core.domain.repository.SettingsRepository
+import com.sonata.core.media.connection.PlayerConnection
 import com.sonata.feature.home.HomeScreen
 import com.sonata.feature.ingest.ImportSheet
 import com.sonata.feature.library.LibraryScreen
 import com.sonata.feature.mix.MixScreen
 import com.sonata.feature.settings.SettingsScreen
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.chrisbanes.haze.rememberHazeState
+import javax.inject.Inject
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector, val iconSelected: ImageVector)
 
 private val tabs = listOf(
     Tab("home", "Home", Icons.Outlined.Home, Icons.Filled.Home),
-    Tab("library", "Library", Icons.Outlined.GraphicEq, Icons.Filled.GraphicEq),
+    Tab("library", "Library", Icons.Outlined.LibraryMusic, Icons.Filled.LibraryMusic),
     Tab("mix", "Mix", Icons.Outlined.Tune, Icons.Filled.Tune),
     Tab("settings", "Settings", Icons.Outlined.Settings, Icons.Filled.Settings),
 )
 
-/**
- * Global shell: single activity + Navigation Compose. Floating glass pill
- * bottom bar (64 dp, 16 dp side/bottom inset), mini-player 8 dp above it and
- * a floating 56 dp Import button on Home and Library only.
- */
 @HiltViewModel
 class AppViewModel @Inject constructor(
     val player: PlayerConnection,
+    private val settingsRepository: SettingsRepository,
 ) : ViewModel() {
+
+    val settings: StateFlow<Settings> = settingsRepository.settings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
     init {
         viewModelScope.launch { player.connect() }
     }
+
+    fun finishOnboarding() = viewModelScope.launch {
+        settingsRepository.update { it.copy(onboardingDone = true) }
+    }
 }
 
+/**
+ * App shell: a navigation host with a floating, translucent navigation bar, a
+ * mini player docked above it and one import sheet. The chrome disappears on
+ * the full-screen player and while the first-run intro is shown.
+ */
 @Composable
 fun SonataApp(
     pendingShares: List<String>,
@@ -108,133 +113,128 @@ fun SonataApp(
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "home"
-    var showImportSheet by remember { mutableStateOf(false) }
-    val spacing = LocalSpacing.current
+    val settings by appViewModel.settings.collectAsState()
+    val radius = LocalRadius.current
     val hazeState = rememberHazeState()
 
-    CompositionLocalProvider(LocalHazeState provides hazeState) {
+    var showImport by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    LaunchedEffect(pendingShares) {
+        if (pendingShares.isNotEmpty()) {
+            showImport = true
+            onConsumedShare()
+        }
+    }
+
+    val chromeVisible = route != "nowPlaying" && settings.onboardingDone
+
+    androidx.compose.runtime.CompositionLocalProvider(LocalHazeState provides hazeState) {
         Box(Modifier.fillMaxSize()) {
-            // Feature destinations: the backdrop every floating glass layer blurs
-            Box(Modifier.fillMaxSize().hazeSource(hazeState)) {
-                AppNavHost(navController)
-            }
-
-        // Mini-player + floating bottom pill
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = Dimensions.bottomBarInset)
-                .padding(bottom = Dimensions.bottomBarInset),
-        ) {
-            MiniPlayerBar(
-                player = appViewModel.player,
-                onOpenNowPlaying = { navController.navigate("nowPlaying") },
-            )
-            BottomPill(navController, route)
-        }
-
-        // Floating Import button on Home and Library only
-        if (route == "home" || route == "library") {
-            IconButton(
-                onClick = { showImportSheet = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(y = -(Dimensions.bottomBarHeight + Dimensions.miniPlayerHeight + Dimensions.miniPlayerGap + 24.dp))
-                    .padding(end = 4.dp)
-                    .size(Dimensions.importButton)
-                    .background(
-                        MaterialTheme.colorScheme.primary,
-                        RoundedCornerShape(50),
-                    )
-                    .semantics { contentDescription = "Import sound" },
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
-            }
-        }
-
-        // Import modal sheet
-        AnimatedVisibility(
-            visible = showImportSheet,
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter),
-        ) {
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .padding(spacing.mdDp)
-                    ,
+                    .fillMaxSize()
+                    .hazeSource(hazeState),
             ) {
-                ImportSheet(
-                    onPickFiles = { showImportSheet = false },
-                    onPickPhotos = { showImportSheet = false },
-                    onRecord = { showImportSheet = false },
-                    streamingEnabled = false,
-                )
+                AppNavHost(navController, onImport = { showImport = true })
             }
-        }
 
-        // First-run onboarding
-        var onboarding by remember { mutableStateOf(true) }
-        LaunchedEffect(pendingShares) {
-            if (pendingShares.isNotEmpty()) {
-                showImportSheet = true
-                onConsumedShare()
-            }
-        }
-        if (onboarding) {
-            OnboardingPager(onFinish = { onboarding = false })
-        }
-        }
-    }
-}
-
-@Composable
-private fun BottomPill(navController: NavHostController, currentRoute: String) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(Dimensions.bottomBarHeight)
-            .backdropGlass(shape = LocalRadius.current.pillShape),
-        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        tabs.forEach { tab ->
-            val selected = currentRoute == tab.route
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clickable { navController.navigate(tab.route) { launchSingleTop = true } }
-                    .semantics { contentDescription = tab.label },
-            ) {
-                if (selected) {
-                    Box(
-                        Modifier
-                            .padding(top = 8.dp)
-                            .size(width = 40.dp, height = 4.dp)
-                            .background(
-                                MaterialTheme.colorScheme.primary,
-                                RoundedCornerShape(2.dp),
-                            ),
+            if (chromeVisible) {
+                Column(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = Dimensions.bottomBarInset, vertical = Dimensions.bottomBarInset),
+                ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        FloatingActionButton(
+                            onClick = { showImport = true },
+                            modifier = Modifier
+                                .size(Dimensions.importButton)
+                                .semantics { contentDescription = "Import a sound" },
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            shape = RoundedCornerShape(radius.md.dp),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                        }
+                    }
+                    MiniPlayerBar(
+                        player = appViewModel.player,
+                        onOpenNowPlaying = { navController.navigate("nowPlaying") { launchSingleTop = true } },
                     )
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = Dimensions.miniPlayerGap),
+                        shape = RoundedCornerShape(radius.lg.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        shadowElevation = 6.dp,
+                    ) {
+                        NavigationBar(
+                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                            tonalElevation = 0.dp,
+                            modifier = Modifier.height(Dimensions.bottomBarHeight),
+                            windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+                        ) {
+                            tabs.forEach { tab ->
+                                val selected = route == tab.route
+                                NavigationBarItem(
+                                    selected = selected,
+                                    onClick = {
+                                        navController.navigate(tab.route) {
+                                            popUpTo(navController.graph.startDestinationId) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    },
+                                    icon = {
+                                        Icon(
+                                            if (selected) tab.iconSelected else tab.icon,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    label = { Text(tab.label) },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                                    ),
+                                )
+                            }
+                        }
+                    }
                 }
-                Icon(
-                    if (selected) tab.iconSelected else tab.icon,
-                    contentDescription = null,
-                    tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    tab.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
+
+            if (!settings.onboardingDone) {
+                OnboardingPager(onFinish = { appViewModel.finishOnboarding() })
+            }
+        }
+    }
+
+    if (showImport) {
+        ModalBottomSheet(
+            onDismissRequest = { showImport = false },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            ImportSheet(
+                onClose = { showImport = false },
+                onOpenSound = {
+                    showImport = false
+                    navController.navigate("library") { launchSingleTop = true }
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun AppNavHost(navController: NavHostController) {
+private fun AppNavHost(
+    navController: androidx.navigation.NavHostController,
+    onImport: () -> Unit,
+) {
     NavHost(navController, startDestination = "home") {
         composable("home") {
             HomeScreen(
@@ -242,22 +242,20 @@ private fun AppNavHost(navController: NavHostController) {
                 onOpenSearch = { navController.navigate("search") },
                 onOpenLibrary = { navController.navigate("library") },
                 onOpenMix = { navController.navigate("mix") },
+                onImport = onImport,
             )
         }
         composable("library") {
             LibraryScreen(onOpenSearch = { navController.navigate("search") })
         }
         composable("mix") {
-            MixScreen(onOpenSampler = { navController.navigate("mix/sampler") })
+            MixScreen()
         }
         composable("settings") {
-            SettingsScreen(
-                onOpenEq = { navController.navigate("settings/eq") },
-                onReplayTutorial = { },
-            )
+            SettingsScreen(onOpenEq = { navController.navigate("settings/eq") })
         }
         composable("search") {
-            com.sonata.feature.library.SearchOverlay()
+            com.sonata.feature.library.SearchOverlay(onClose = { navController.popBackStack() })
         }
         composable("nowPlaying") {
             val appViewModel: AppViewModel = hiltViewModel()
@@ -273,18 +271,13 @@ private fun AppNavHost(navController: NavHostController) {
                 Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background)
-                    .padding(top = 24.dp),
+                    .padding(top = 8.dp),
             ) {
-                IconButton(onClick = { navController.popBackStack() }) {
-                    Icon(androidx.compose.material.icons.Icons.Default.ExpandMore, contentDescription = "Back")
+                androidx.compose.material3.IconButton(onClick = { navController.popBackStack() }) {
+                    Icon(Icons.Filled.ExpandMore, contentDescription = "Back")
                 }
-                com.sonata.feature.settings.eq.EqScreen(
-                    dsp = settingsViewModel.dsp,
-                    onOpenPresets = { },
-                )
+                com.sonata.feature.settings.eq.EqScreen(dsp = settingsViewModel.dsp)
             }
         }
     }
 }
-
-private val Add = Icons.Filled.Add

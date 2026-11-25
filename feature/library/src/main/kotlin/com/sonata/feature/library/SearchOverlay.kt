@@ -1,66 +1,65 @@
 package com.sonata.feature.library
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sonata.core.brain.NaturalLanguageSearch
+import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalSpacing
-import com.sonata.core.designsystem.components.glassSurface
+import com.sonata.core.designsystem.components.SoundRow
 import com.sonata.core.domain.model.Sound
 import com.sonata.core.domain.repository.SoundRepository
+import com.sonata.core.media.connection.PlayerConnection
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 @OptIn(FlowPreview::class)
 @HiltViewModel
 class SearchViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
+    private val player: PlayerConnection,
 ) : ViewModel() {
 
     private val rawQuery = MutableStateFlow("")
 
-    val query: kotlinx.coroutines.flow.StateFlow<String> = rawQuery
+    val query = rawQuery
 
     val results = rawQuery
         .debounce(120)
@@ -71,124 +70,103 @@ class SearchViewModel @Inject constructor(
                 val parsed = NaturalLanguageSearch.parse(input)
                 val matches = soundRepository.search(input.takeIf { parsed.text.isBlank() } ?: parsed.text)
                     .first()
-                val filtered = matches.filter { s ->
-                    (parsed.bpmMin?.let { (s.bpm ?: 0) >= it } ?: true) &&
-                        (parsed.bpmMax?.let { (s.bpm ?: 999) <= it } ?: true) &&
-                        (parsed.durationMaxMs?.let { s.durationMs <= it } ?: true) &&
-                        (parsed.durationMinMs?.let { s.durationMs >= it } ?: true) &&
-                        (parsed.mood?.let { s.mood == it } ?: true)
+                val filtered = matches.filter { sound ->
+                    (parsed.bpmMin?.let { (sound.bpm ?: 0) >= it } ?: true) &&
+                        (parsed.bpmMax?.let { (sound.bpm ?: 999) <= it } ?: true) &&
+                        (parsed.durationMaxMs?.let { sound.durationMs <= it } ?: true) &&
+                        (parsed.durationMinMs?.let { sound.durationMs >= it } ?: true) &&
+                        (parsed.mood?.let { sound.mood == it } ?: true)
                 }
                 SearchState(filtered, parsed.understood)
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SearchState(emptyList(), null))
 
-    fun setQuery(text: String) {
-        rawQuery.value = text
+    fun setQuery(text: String) { rawQuery.value = text }
+
+    fun play(sounds: List<Sound>, index: Int) = viewModelScope.launch {
+        if (sounds.isEmpty() || index !in sounds.indices) return@launch
+        player.play(sounds, index)
+        soundRepository.incrementPlayCount(sounds[index].id)
     }
 }
 
 data class SearchState(val sounds: List<Sound>, val understoodAs: String?)
 
-/** Full-screen glass search overlay with live grouped results and an
- *  "Understood as:" chip row for natural-language queries. */
+/**
+ * Search over the local library. Text matches titles, artists and tags; the
+ * same field understands tempo, length and mood ("slow 120 bpm under 40s").
+ */
 @Composable
-fun SearchOverlay(viewModel: SearchViewModel = hiltViewModel()) {
+fun SearchOverlay(
+    onClose: () -> Unit,
+    viewModel: SearchViewModel = hiltViewModel(),
+) {
     val state by viewModel.results.collectAsState()
     val query by viewModel.query.collectAsState()
     val spacing = LocalSpacing.current
-    var filter by remember { mutableStateOf("Sounds") }
+    val focus = remember { FocusRequester() }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .glassSurface(),
-    ) {
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+    Column(Modifier.fillMaxSize().padding(horizontal = spacing.mdDp)) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(spacing.mdDp),
+                .padding(top = spacing.smDp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(spacing.smDp),
         ) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = viewModel::setQuery,
-                placeholder = { Text("Search sounds, playlists, tags…") },
+                placeholder = { Text("Title, artist, tag or a phrase") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 modifier = Modifier
                     .weight(1f)
+                    .focusRequester(focus)
                     .semantics { contentDescription = "Search field" },
                 singleLine = true,
             )
-            IconButton(
-                onClick = {},
-                modifier = Modifier.semantics { contentDescription = "Voice search" },
-            ) { Icon(Icons.Default.Mic, contentDescription = null) }
-            IconButton(
-                onClick = { viewModel.setQuery("") },
-                modifier = Modifier.semantics { contentDescription = "Close search" },
-            ) { Icon(Icons.Default.Close, contentDescription = null) }
         }
 
-        Row(
-            Modifier.padding(horizontal = spacing.mdDp),
-            horizontalArrangement = Arrangement.spacedBy(spacing.smDp),
-        ) {
-            listOf("Sounds", "Playlists", "Streaming", "Tags").forEach { f ->
-                FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f) })
-            }
-        }
-
-        state.understoodAs?.let {
+        state.understoodAs?.let { understood ->
             Text(
-                "Understood as: $it",
-                style = MaterialTheme.typography.labelSmall,
+                "Understood as $understood",
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(spacing.mdDp),
+                modifier = Modifier.padding(vertical = spacing.smDp),
+            )
+        }
+
+        if (query.isBlank()) {
+            Text(
+                "Try “slow 120 bpm under 40 seconds”, an artist, or a tag from an import.",
+                Modifier.padding(vertical = spacing.lgDp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (state.sounds.isEmpty()) {
+            Text(
+                "Nothing matches “$query”.",
+                Modifier.padding(vertical = spacing.lgDp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
         LazyColumn(
-            Modifier
-                .fillMaxSize()
-                .padding(horizontal = spacing.mdDp),
+            contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             items(state.sounds, key = { it.id }) { sound ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(spacing.mdDp),
-                ) {
-                    Box(
-                        Modifier
-                            .size(44.dp)
-                            .background(MaterialTheme.colorScheme.surfaceContainer, CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(sound.title.take(1))
-                    }
-                    Column {
-                        Text(sound.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            sound.artist ?: sound.source.name.lowercase(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-            if (state.sounds.isEmpty()) {
-                item {
-                    Text(
-                        "No results yet — try \"slow sad songs under 30 seconds\"",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 24.dp),
-                    )
-                }
+                SoundRow(
+                    sound = sound,
+                    onPlay = { viewModel.play(state.sounds, state.sounds.indexOf(sound)) },
+                    onClick = { viewModel.play(state.sounds, state.sounds.indexOf(sound)) },
+                )
             }
         }
     }

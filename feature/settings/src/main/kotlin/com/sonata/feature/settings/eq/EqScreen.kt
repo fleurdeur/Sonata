@@ -7,10 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
@@ -25,7 +23,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -54,14 +51,11 @@ private fun inverseLogX(x: Float, width: Float): Float =
  * Compressor, Limiter, Effects, Output).
  */
 @Composable
-fun EqScreen(
-    dsp: DspManager,
-    onOpenPresets: () -> Unit,
-    suggestedPreset: String? = null,
-    onTrySuggested: () -> Unit = {},
-) {
+fun EqScreen(dsp: DspManager) {
     val spacing = LocalSpacing.current
     val config by dsp.state.collectAsState()
+    val accent = MaterialTheme.colorScheme.primary
+    val grid = MaterialTheme.colorScheme.outlineVariant
     val engine by dsp.engineKind.collectAsState()
     var selectedBand by remember { mutableIntStateOf(0) }
     var tab by remember { mutableIntStateOf(0) }
@@ -88,12 +82,7 @@ fun EqScreen(
                     onCheckedChange = { on -> dsp.update { c -> c.copy(bypass = on) } },
                     modifier = Modifier.semantics { contentDescription = "Bypass equalizer" },
                 )
-                AssistChip(onClick = onOpenPresets, label = { Text("Presets") })
             }
-        }
-
-        suggestedPreset?.let {
-            AssistChip(onClick = onTrySuggested, label = { Text("✦ Suggested: $it — Try") })
         }
 
         // Frequency response curve, 20 Hz–20 kHz log scale, ±15 dB.
@@ -105,7 +94,7 @@ fun EqScreen(
         ) {
             for (f in listOf(50f, 100f, 200f, 500f, 1000f, 2000f, 5000f, 10000f, 20000f)) {
                 val x = logX(f, size.width)
-                drawLine(Color.Gray.copy(alpha = 0.25f), Offset(x, 0f), Offset(x, size.height), 1f)
+                drawLine(grid, Offset(x, 0f), Offset(x, size.height), 1f)
             }
             val path = Path()
             var x = 0f
@@ -116,7 +105,7 @@ fun EqScreen(
                 if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
                 x += 2
             }
-            drawPath(path, Color(0xFF6C5CE7), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+            drawPath(path, accent, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
         }
 
         TabRow(selectedTabIndex = tab) {
@@ -266,5 +255,4 @@ private fun OutputPanel(config: DspConfig, onChange: (DspConfig) -> Unit) {
         Text("Loudness normalization (EBU R128)")
         Switch(checked = config.loudnessNormalization, onCheckedChange = { on -> onChange(config.copy(loudnessNormalization = on)) })
     }
-    OutlinedButton(onClick = {}) { Text("Save current as preset") }
 }

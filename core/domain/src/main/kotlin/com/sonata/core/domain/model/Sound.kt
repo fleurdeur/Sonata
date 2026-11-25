@@ -1,13 +1,23 @@
 package com.sonata.core.domain.model
 
-enum class SoundSource { LOCAL, LINK, RECORDING, SHARE, WATCHED_FOLDER, STREAMING }
+enum class SoundSource { LOCAL, LINK, TIKTOK, RECORDING, SHARE, WATCHED_FOLDER, STREAMING }
 
 enum class ImportStatus { QUEUED, DOWNLOADING, EXTRACTING, ANALYZING, READY, FAILED }
 
 enum class MusicalKey(val display: String, val camelot: String) {
     C("C", "8B"), G("G", "9B"), D("D", "10B"), A("A", "11B"), E("E", "12B"),
     B("B", "1B"), F_SHARP("F#", "2B"), C_SHARP("Db", "3B"), G_SHARP("Ab", "4B"),
-    D_SHARP("Eb", "5B"), A_SHARP("Bb", "6B"), F("F", "7B"),
+    D_SHARP("Eb", "5B"), A_SHARP("Bb", "6B"), F("F", "7B");
+
+    companion object {
+        /** Pitch class (0 = C) to key name, independent of this enum's order. */
+        private val BY_PITCH_CLASS = arrayOf(
+            C, C_SHARP, D, D_SHARP, E, F, F_SHARP, G, G_SHARP, A, A_SHARP, B,
+        )
+
+        fun fromPitchClass(pitchClass: Int): MusicalKey =
+            BY_PITCH_CLASS[((pitchClass % 12) + 12) % 12]
+    }
 }
 
 data class Sound(

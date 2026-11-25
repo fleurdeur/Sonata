@@ -8,6 +8,7 @@ dependencies {
     implementation(project(":core:database"))
     implementation(project(":core:data"))
     implementation(project(":core:extractor"))
+    implementation(project(":core:audio"))
     implementation(libs.work.runtime)
     implementation(libs.media3.transformer)
     implementation(libs.media3.exoplayer)

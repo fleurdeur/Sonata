@@ -5,111 +5,126 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.sonata.core.designsystem.LocalSpacing
-import com.sonata.core.designsystem.components.backdropGlass
 
-private data class OnboardingStep(
-    val title: String,
-    val message: String,
-    val actionLabel: String,
-)
+private data class Step(val title: String, val message: String)
 
 private val steps = listOf(
-    OnboardingStep(
-        "Share a sound",
-        "Send any video or link to Sonata from the Share Sheet, or paste a link on Home.",
-        "Import your first sound",
+    Step(
+        "Share a TikTok video",
+        "Open the video, tap Share, then More, then Sonata. The post is read on this device and its audio is separated immediately.",
     ),
-    OnboardingStep(
-        "Trim and loop it",
-        "Dead air is trimmed automatically — preview what was cut and undo it anytime.",
-        "Try the trimmer",
+    Step(
+        "The sound becomes a track",
+        "Sonata fetches the full song when TikTok exposes it. Otherwise it loops the clip into a complete track, keeping the original tempo and reverb character.",
     ),
-    OnboardingStep(
-        "Pick a sound",
-        "The EQ engine ships with 30+ presets. Tap Try to hear Hardstyle on your clip.",
-        "Open the EQ",
-    ),
-    OnboardingStep(
-        "Build a playlist",
-        "Drag to reorder, long-press to multi-select, then hit Mix for smooth transitions.",
-        "Create a playlist",
+    Step(
+        "Yours to keep",
+        "Tracks are stored on your phone with tempo, key and a waveform. No account, no ads, no uploads.",
     ),
 )
 
-/**
- * Four-step first-run pager with progress dots and Skip — install to first
- * saved sound in under 30 seconds.
- */
+/** Three honest screens about what the app actually does; shown once. */
 @Composable
 fun OnboardingPager(onFinish: () -> Unit) {
-    var step by remember { mutableIntStateOf(0) }
+    val pager = rememberPagerState { steps.size }
+    val scope = rememberCoroutineScope()
     val spacing = LocalSpacing.current
-    val stepData = steps[step]
 
-    Box(
+    Column(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.55f)),
-        contentAlignment = Alignment.Center,
+            .background(MaterialTheme.colorScheme.background)
+            .padding(spacing.lgDp),
     ) {
-        Column(
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onFinish, modifier = Modifier.semantics { contentDescription = "Skip tutorial" }) {
+                Text("Skip")
+            }
+        }
+
+        HorizontalPager(
+            state = pager,
+            modifier = Modifier.weight(1f),
+        ) { page ->
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = spacing.xlDp),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    "${page + 1} of ${steps.size}",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(spacing.smDp))
+                Text(steps[page].title, style = MaterialTheme.typography.headlineLarge)
+                Spacer(Modifier.height(spacing.mdDp))
+                Text(
+                    steps[page].message,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Row(
             Modifier
-                .padding(spacing.lgDp)
-                .backdropGlass()
-                .padding(spacing.lgDp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(spacing.mdDp),
+                .fillMaxWidth()
+                .padding(bottom = spacing.mdDp),
+            horizontalArrangement = Arrangement.Center,
         ) {
-            Text(stepData.title, style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stepData.message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(spacing.xsDp)) {
-                steps.forEachIndexed { i, _ ->
-                    Box(
-                        Modifier
-                            .size(if (i == step) 12.dp else 8.dp)
-                            .background(
-                                if (i == step) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                CircleShape,
-                            ),
-                    )
+            steps.indices.forEach { index ->
+                Box(
+                    Modifier
+                        .padding(horizontal = 3.dp)
+                        .size(if (index == pager.currentPage) 8.dp else 6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (index == pager.currentPage) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                )
+            }
+        }
+
+        Button(
+            onClick = {
+                if (pager.currentPage == steps.lastIndex) {
+                    onFinish()
+                } else {
+                    // Advancing is a one-shot intent; the pager animates.
+                    scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
                 }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                OutlinedButton(
-                    onClick = onFinish,
-                    modifier = Modifier.semantics { contentDescription = "Skip tutorial" },
-                ) { Text("Skip") }
-                Button(
-                    onClick = { if (step == steps.lastIndex) onFinish() else step += 1 },
-                    modifier = Modifier.semantics { contentDescription = stepData.actionLabel },
-                ) { Text(if (step == steps.lastIndex) "Done" else "Next") }
-            }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+        ) {
+            Text(if (pager.currentPage == steps.lastIndex) "Start using Sonata" else "Next")
         }
     }
 }

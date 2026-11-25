@@ -8,7 +8,7 @@ enum class PlayerStyle { FULL_BLEED, VINYL, CASSETTE, WAVEFORM, GLASS_CARD }
 data class Settings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = true,
-    val accent: Int = 0xFF6C5CE7.toInt(),
+    val accent: Int = 0xFF4B44C7.toInt(),
     val coverAdaptiveTheme: Boolean = false,
     val playerStyle: PlayerStyle = PlayerStyle.FULL_BLEED,
     val blurStrength: Int = 16,

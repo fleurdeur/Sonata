@@ -54,7 +54,7 @@ class SettingsDataStore @Inject constructor(
         Settings(
             themeMode = p[Keys.theme]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
             dynamicColor = p[Keys.dynamic] ?: true,
-            accent = p[Keys.accent] ?: 0xFF6C5CE7.toInt(),
+            accent = p[Keys.accent] ?: 0xFF4B44C7.toInt(),
             playerStyle = p[Keys.playerStyle]?.let { runCatching { PlayerStyle.valueOf(it) }.getOrNull() }
                 ?: PlayerStyle.FULL_BLEED,
             blurStrength = p[Keys.blur] ?: 16,
@@ -99,7 +99,7 @@ class SettingsDataStore @Inject constructor(
     private fun current(p: androidx.datastore.preferences.core.Preferences): Settings =
         Settings(
             themeMode = p[Keys.theme]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
-            accent = p[Keys.accent] ?: 0xFF6C5CE7.toInt(),
+            accent = p[Keys.accent] ?: 0xFF4B44C7.toInt(),
             playerStyle = p[Keys.playerStyle]?.let { runCatching { PlayerStyle.valueOf(it) }.getOrNull() }
                 ?: PlayerStyle.FULL_BLEED,
             onboardingDone = p[Keys.onboarding] ?: false,

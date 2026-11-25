@@ -2,7 +2,7 @@ package com.sonata.core.domain.model
 
 import kotlinx.serialization.Serializable
 
-enum class ImportStage { QUEUED, RESOLVING, DOWNLOADING, EXTRACTING, ANALYZING, DONE, FAILED }
+enum class ImportStage { QUEUED, RESOLVING, DOWNLOADING, EXTRACTING, ANALYZING, RENDERING, DONE, FAILED }
 
 @Serializable
 data class ImportJob(
