@@ -4,6 +4,7 @@ local.properties
 .idea/
 *.iml
 captures/
+dist/
 .externalNativeBuild/
 .cxx/
 .DS_Store

@@ -53,7 +53,7 @@ interface PresetDao {
 
 @Dao
 interface ImportJobDao {
-    @Query("SELECT * FROM import_jobs ORDER BY id")
+    @Query("SELECT * FROM import_jobs ORDER BY rowid")
     fun observeQueue(): Flow<List<ImportJobEntity>>
 
     @Upsert

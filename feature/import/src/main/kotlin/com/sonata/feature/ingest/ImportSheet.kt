@@ -75,11 +75,16 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class ImportViewModel @Inject constructor(
     private val queue: ImportQueue,
-    importRepository: ImportRepository,
+    private val importRepository: ImportRepository,
 ) : ViewModel() {
 
     val jobs = importRepository.observeQueue()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        // Finished rows from earlier sessions are not history; the library is.
+        viewModelScope.launch { importRepository.clearFinished() }
+    }
 
     fun importLink(url: String) = viewModelScope.launch {
         queue.enqueue(url.trim(), isLink = true, title = url.trim())
