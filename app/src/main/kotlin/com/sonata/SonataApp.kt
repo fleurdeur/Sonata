@@ -36,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,8 +59,13 @@ import androidx.lifecycle.viewModelScope
 import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalRadius
 import com.sonata.core.designsystem.LocalSpacing
+import com.sonata.core.designsystem.components.LocalHazeState
+import com.sonata.core.designsystem.components.backdropGlass
 import com.sonata.core.designsystem.components.glassSurface
 import com.sonata.core.media.connection.PlayerConnection
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.rememberHazeState
+import dev.chrisbanes.haze.hazeSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.launch
@@ -104,10 +110,14 @@ fun SonataApp(
     val route = backStack?.destination?.route ?: "home"
     var showImportSheet by remember { mutableStateOf(false) }
     val spacing = LocalSpacing.current
+    val hazeState = rememberHazeState()
 
-    Box(Modifier.fillMaxSize()) {
-        // Feature destinations
-        AppNavHost(navController)
+    CompositionLocalProvider(LocalHazeState provides hazeState) {
+        Box(Modifier.fillMaxSize()) {
+            // Feature destinations: the backdrop every floating glass layer blurs
+            Box(Modifier.fillMaxSize().hazeSource(hazeState)) {
+                AppNavHost(navController)
+            }
 
         // Mini-player + floating bottom pill
         Column(
@@ -175,6 +185,7 @@ fun SonataApp(
         if (onboarding) {
             OnboardingPager(onFinish = { onboarding = false })
         }
+        }
     }
 }
 
@@ -184,7 +195,7 @@ private fun BottomPill(navController: NavHostController, currentRoute: String) {
         Modifier
             .fillMaxWidth()
             .height(Dimensions.bottomBarHeight)
-            .glassSurface(shape = LocalRadius.current.pillShape),
+            .backdropGlass(shape = LocalRadius.current.pillShape),
         horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {

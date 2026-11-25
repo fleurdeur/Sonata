@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalRadius
 import com.sonata.core.designsystem.LocalSpacing
-import com.sonata.core.designsystem.components.glassSurface
+import com.sonata.core.designsystem.components.backdropGlass
 import com.sonata.core.media.connection.PlayerConnection
 import com.sonata.core.media.connection.PlayerState
 
@@ -72,7 +72,7 @@ fun MiniPlayerBar(
             Modifier
                 .fillMaxWidth()
                 .height(Dimensions.miniPlayerHeight)
-                .glassSurface(shape = radius.mdShape)
+                .backdropGlass(shape = radius.mdShape)
                 .clickable(onClick = onOpenNowPlaying)
                 .semantics { contentDescription = "Open Now Playing" },
             verticalAlignment = Alignment.CenterVertically,

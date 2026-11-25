@@ -42,6 +42,7 @@ import androidx.lifecycle.viewModelScope
 import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalRadius
 import com.sonata.core.designsystem.LocalSpacing
+import com.sonata.core.designsystem.components.backdropGlass
 import com.sonata.core.designsystem.components.glassSurface
 import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
@@ -79,7 +80,11 @@ fun ImportSheet(
     val jobs by viewModel.jobs.collectAsState()
     val spacing = LocalSpacing.current
 
-    Column(Modifier.padding(spacing.mdDp)) {
+    Column(
+        Modifier
+            .backdropGlass(shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+            .padding(spacing.mdDp),
+    ) {
         Text("Import", style = MaterialTheme.typography.headlineMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(spacing.smDp)) {
             ImportTile(

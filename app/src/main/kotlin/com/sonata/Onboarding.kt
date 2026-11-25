@@ -27,7 +27,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.sonata.core.designsystem.LocalSpacing
-import com.sonata.core.designsystem.components.glassSurface
+import com.sonata.core.designsystem.components.backdropGlass
 
 private data class OnboardingStep(
     val title: String,
@@ -77,7 +77,7 @@ fun OnboardingPager(onFinish: () -> Unit) {
         Column(
             Modifier
                 .padding(spacing.lgDp)
-                .glassSurface()
+                .backdropGlass()
                 .padding(spacing.lgDp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(spacing.mdDp),

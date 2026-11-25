@@ -7,6 +7,7 @@ android { namespace = "com.sonata.core.designsystem" }
 
 dependencies {
     api(project(":core:domain"))
+    api(libs.haze)
     implementation(libs.palette.ktx)
     implementation(libs.compose.material.icons)
     implementation(libs.compose.material3)
