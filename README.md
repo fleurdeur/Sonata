@@ -9,10 +9,10 @@
 
 <br/>
 
-[![Latest release](https://img.shields.io/github/v/release/sonata-app/Sonata?style=for-the-badge&labelColor=0d1117)](https://github.com/sonata-app/Sonata/releases)
-[![License](https://img.shields.io/github/license/sonata-app/Sonata?style=for-the-badge&labelColor=0d1117)](https://github.com/sonata-app/Sonata/blob/main/LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/sonata-app/Sonata/ci.yml?style=for-the-badge&labelColor=0d1117)](https://github.com/sonata-app/Sonata/actions)
-[![Core size](https://img.shields.io/badge/core%20bundle-7%20MB-6C5CE7?style=for-the-badge&labelColor=0d1117)](https://github.com/sonata-app/Sonata/releases)
+[![Latest release](https://img.shields.io/github/v/release/fleurdeur/Sonata?style=for-the-badge&labelColor=0d1117)](https://github.com/fleurdeur/Sonata/releases)
+[![License](https://img.shields.io/github/license/fleurdeur/Sonata?style=for-the-badge&labelColor=0d1117)](https://github.com/fleurdeur/Sonata/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/fleurdeur/Sonata/ci.yml?style=for-the-badge&labelColor=0d1117)](https://github.com/fleurdeur/Sonata/actions)
+[![Core size](https://img.shields.io/badge/core%20bundle-7%20MB-6C5CE7?style=for-the-badge&labelColor=0d1117)](https://github.com/fleurdeur/Sonata/releases)
 
 <br/>
 
@@ -103,7 +103,7 @@ Sonata treats a 15-second TikTok clip with the same respect as a full album trac
 
 <h1><a id="download"></a>Download</h1>
 
-Grab the latest AAB / APK from the [Releases](https://github.com/sonata-app/Sonata/releases) page. Sideloading requires enabling "Install unknown apps" for whichever app you download it with. The core app ships as an **~7 MB** Android App Bundle with R8, resource shrinking, vector-only assets and an on-demand stem-separation module.
+Grab the latest AAB / APK from the [Releases](https://github.com/fleurdeur/Sonata/releases) page. Sideloading requires enabling "Install unknown apps" for whichever app you download it with. The core app ships as an **~7 MB** Android App Bundle with R8, resource shrinking, vector-only assets and an on-demand stem-separation module.
 
 </div>
 
@@ -116,7 +116,7 @@ Grab the latest AAB / APK from the [Releases](https://github.com/sonata-app/Sona
 </div>
 
 ```bash
-git clone https://github.com/sonata-app/Sonata.git
+git clone https://github.com/fleurdeur/Sonata.git
 cd Sonata
 
 # JDK 17+ and an Android SDK with platform 36 are required.
