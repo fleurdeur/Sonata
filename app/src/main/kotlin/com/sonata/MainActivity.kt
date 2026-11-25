@@ -1,6 +1,7 @@
 package com.sonata
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,11 +16,14 @@ import com.sonata.core.domain.repository.SettingsRepository
 import com.sonata.core.work.pipeline.ImportQueue
 import com.sonata.core.work.pipeline.ImportWorker
 import dagger.hilt.android.AndroidEntryPoint
+import java.io.File
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The single activity. Handles every share-sheet entry point
@@ -62,10 +66,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        runCatching { doHandleIntent(intent) }
+            .onFailure { android.util.Log.e(TAG, "handleIntent failed", it) }
+    }
+
+    private fun doHandleIntent(intent: Intent?) {
+        android.util.Log.i(TAG, "intent action=${intent?.action} type=${intent?.type}")
         if (intent?.action == Intent.ACTION_SEND) {
             when (intent.type) {
                 "text/plain" -> intent.getStringExtra(Intent.EXTRA_TEXT)?.let { link ->
-                    lifecycleScope.launch { importQueue.enqueue(link, isLink = true) }
+                    android.util.Log.i(TAG, "enqueue link $link")
+                    lifecycleScope.launch { runEnqueue(link, isLink = true) }
                 }
                 else -> {
                     val stream = androidx.core.content.IntentCompat.getParcelableExtra(
@@ -73,8 +84,9 @@ class MainActivity : ComponentActivity() {
                         Intent.EXTRA_STREAM,
                         android.net.Uri::class.java,
                     )
+                    android.util.Log.i(TAG, "stream=$stream")
                     stream?.let { uri ->
-                        lifecycleScope.launch { importQueue.enqueue(uri.toString(), isLink = false) }
+                        lifecycleScope.launch { enqueueLocal(uri.toString(), isLink = false) }
                     }
                 }
             }
@@ -86,8 +98,55 @@ class MainActivity : ComponentActivity() {
                 android.net.Uri::class.java,
             ) ?: emptyList()
             lifecycleScope.launch {
-                uris.forEach { importQueue.enqueue(it.toString(), isLink = false) }
+                uris.forEach { enqueueLocal(it.toString(), isLink = false) }
             }
         }
+    }
+
+    private suspend fun runEnqueue(source: String, isLink: Boolean) {
+        runCatching { importQueue.enqueue(source, isLink = isLink) }
+            .onFailure { android.util.Log.e(TAG, "enqueue failed", it) }
+            .onSuccess { android.util.Log.i(TAG, "enqueued ok: $source") }
+    }
+
+    /**
+     * Share-sheet and media-provider grants only cover this activity's process, so a
+     * background ImportWorker cannot reopen the URI later. Snapshot every content URI
+     * into the inbox cache while the grant is still valid, and hand the worker a
+     * local file it can always read.
+     */
+    private suspend fun snapshotUri(source: String): String = withContext(Dispatchers.IO) {
+        val uri = Uri.parse(source)
+        if (uri.scheme != "content") return@withContext source
+        val dir = File(cacheDir, "inbox").apply { mkdirs() }
+        val name = displayName(uri) ?: "sound-${System.currentTimeMillis()}"
+        val out = File(dir, name)
+        val input = contentResolver.openInputStream(uri) ?: error("cannot open $source")
+        input.use { ins -> out.outputStream().use { ins.copyTo(it) } }
+        Uri.fromFile(out).toString()
+    }
+
+    private fun displayName(uri: Uri): String? {
+        val base = runCatching {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && c.moveToFirst() && !c.isNull(idx)) c.getString(idx) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment
+        val stamp = System.currentTimeMillis()
+        val safe = (base ?: "sound").replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        return "$stamp-$safe"
+    }
+
+    private suspend fun enqueueLocal(source: String, isLink: Boolean) {
+        runCatching {
+            val local = if (isLink) source else snapshotUri(source)
+            importQueue.enqueue(local, isLink = isLink)
+        }.onFailure { android.util.Log.e(TAG, "enqueue failed", it) }
+            .onSuccess { android.util.Log.i(TAG, "enqueued ok: $source -> $it") }
+    }
+
+    private companion object {
+        const val TAG = "SonataShare"
     }
 }

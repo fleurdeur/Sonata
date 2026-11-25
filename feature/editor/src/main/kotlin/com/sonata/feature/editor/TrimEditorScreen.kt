@@ -53,6 +53,7 @@ fun TrimEditorScreen(
 ) {
     val spacing = LocalSpacing.current
     val haptics = LocalHapticFeedback.current
+    val durationMs = durationMs.coerceAtLeast(1L)
     var zoom by remember { mutableFloatStateOf(1f) }
     var selectionStart by remember { mutableLongStateOf(0L) }
     var selectionEnd by remember { mutableLongStateOf(durationMs) }

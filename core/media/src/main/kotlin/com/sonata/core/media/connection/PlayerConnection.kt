@@ -58,14 +58,16 @@ class PlayerConnection @Inject constructor(
 
     suspend fun connect() = withContext(Dispatchers.Main) {
         if (controller != null) return@withContext
-        val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val future = MediaController.Builder(context, token).buildAsync()
-        controller = future.await()
-        controller?.addListener(object : Player.Listener {
-            override fun onEvents(player: Player, events: Player.Events) {
-                onPlayerChanged()
-            }
-        })
+        runCatching {
+            val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
+            val future = MediaController.Builder(context, token).buildAsync()
+            controller = future.await()
+            controller?.addListener(object : Player.Listener {
+                override fun onEvents(player: Player, events: Player.Events) {
+                    onPlayerChanged()
+                }
+            })
+        }
         ticker()
     }
 
@@ -106,6 +108,7 @@ class PlayerConnection @Inject constructor(
     }
 
     fun play(sounds: List<Sound>, startIndex: Int = 0) {
+        if (sounds.isEmpty()) return
         val player = controller ?: return
         queuedSounds = sounds
         player.setMediaItems(

@@ -7,3 +7,6 @@ captures/
 .externalNativeBuild/
 .cxx/
 .DS_Store
+keystore.properties
+sonata-release.jks
+*.jks

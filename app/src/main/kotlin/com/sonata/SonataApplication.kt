@@ -25,6 +25,6 @@ class SonataApplication : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         // Seed the large factory preset library once.
-        appScope.launch { presetRepository.seedIfEmpty() }
+        appScope.launch { runCatching { presetRepository.seedIfEmpty() } }
     }
 }

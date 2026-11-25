@@ -26,79 +26,95 @@ class AudioStore @Inject constructor(
 
     /** Downmixes + decodes any container to mono-agnostic 16-bit PCM. */
     suspend fun extractToPcm(uri: String): ShortArray = withContext(Dispatchers.IO) {
-        val localFile: File
-        if (uri.startsWith("http")) {
-            localFile = File(context.cacheDir, "download_${System.currentTimeMillis()}")
-            java.net.URL(uri).openStream().use { input ->
-                localFile.outputStream().use { input.copyTo(it) }
-            }
-        } else {
-            localFile = uriToFile(uri)
-        }
-
-        val extractor = MediaExtractor()
-        try {
-            extractor.setDataSource(localFile.absolutePath)
-            var trackIndex = -1
-            var format: MediaFormat? = null
-            for (i in 0 until extractor.trackCount) {
-                val f = extractor.getTrackFormat(i)
-                if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
-                    trackIndex = i
-                    format = f
-                    break
+        val localFile: File? = if (uri.startsWith("http")) {
+            File(context.cacheDir, "download_${System.currentTimeMillis()}").also { f ->
+                java.net.URL(uri).openStream().use { input ->
+                    f.outputStream().use { input.copyTo(it) }
                 }
             }
-            format ?: throw IllegalArgumentException("No audio track found")
-            extractor.selectTrack(trackIndex)
+        } else null
 
-            val mime = format.getString(MediaFormat.KEY_MIME)!!
-            val codec = MediaCodec.createDecoderByType(mime)
-            codec.configure(format, null, null, 0)
-            codec.start()
+        val pcm = ArrayList<Short>(1024 * 64)
+        val extractor = MediaExtractor()
+        try {
+            // fd-based setDataSource: path-based media extraction fails on FUSE
+            // mounts (emulators, scoped storage), file descriptors never do.
+            val pfd = if (localFile != null) {
+                android.os.ParcelFileDescriptor.open(
+                    localFile,
+                    android.os.ParcelFileDescriptor.MODE_READ_ONLY,
+                )
+            } else {
+                runCatching { context.contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "r") }
+                    .getOrNull()
+                    ?: android.os.ParcelFileDescriptor.open(
+                        uriToFile(uri),
+                        android.os.ParcelFileDescriptor.MODE_READ_ONLY,
+                    )
+            }
+            pfd.use { descriptor ->
+                extractor.setDataSource(descriptor.fileDescriptor)
 
-            val pcm = ArrayList<Short>(1024 * 64)
-            val bufferInfo = MediaCodec.BufferInfo()
-            var sawInputEos = false
-            var sawOutputEos = false
+                var trackIndex = -1
+                var format: MediaFormat? = null
+                for (i in 0 until extractor.trackCount) {
+                    val f = extractor.getTrackFormat(i)
+                    if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                        trackIndex = i
+                        format = f
+                        break
+                    }
+                }
+                format ?: throw IllegalArgumentException("No audio track found")
+                extractor.selectTrack(trackIndex)
 
-            while (!sawOutputEos) {
-                if (!sawInputEos) {
-                    val inIndex = codec.dequeueInputBuffer(10_000)
-                    if (inIndex >= 0) {
-                        val inputBuffer = codec.getInputBuffer(inIndex)!!
-                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(
-                                inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                            )
-                            sawInputEos = true
-                        } else {
-                            codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
-                            extractor.advance()
+                val mime = format.getString(MediaFormat.KEY_MIME)!!
+                val codec = MediaCodec.createDecoderByType(mime)
+                codec.configure(format, null, null, 0)
+                codec.start()
+
+                val bufferInfo = MediaCodec.BufferInfo()
+                var sawInputEos = false
+                var sawOutputEos = false
+
+                while (!sawOutputEos) {
+                    if (!sawInputEos) {
+                        val inIndex = codec.dequeueInputBuffer(10_000)
+                        if (inIndex >= 0) {
+                            val inputBuffer = codec.getInputBuffer(inIndex)!!
+                            val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                            if (sampleSize < 0) {
+                                codec.queueInputBuffer(
+                                    inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                                )
+                                sawInputEos = true
+                            } else {
+                                codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
+                                extractor.advance()
+                            }
+                        }
+                    }
+                    val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
+                    if (outIndex >= 0) {
+                        val out = codec.getOutputBuffer(outIndex)!!
+                        out.position(bufferInfo.offset)
+                        out.limit(bufferInfo.offset + bufferInfo.size)
+                        while (out.remaining() >= 2) {
+                            pcm += out.short
+                        }
+                        codec.releaseOutputBuffer(outIndex, false)
+                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            sawOutputEos = true
                         }
                     }
                 }
-                val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
-                if (outIndex >= 0) {
-                    val out = codec.getOutputBuffer(outIndex)!!
-                    out.position(bufferInfo.offset)
-                    out.limit(bufferInfo.offset + bufferInfo.size)
-                    while (out.remaining() >= 2) {
-                        pcm += out.short
-                    }
-                    codec.releaseOutputBuffer(outIndex, false)
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        sawOutputEos = true
-                    }
-                }
+                codec.stop()
+                codec.release()
             }
-            codec.stop()
-            codec.release()
             pcm.toShortArray()
         } finally {
             extractor.release()
-            if (uri.startsWith("http")) localFile.delete()
+            if (uri.startsWith("http")) localFile?.delete()
         }
     }
 

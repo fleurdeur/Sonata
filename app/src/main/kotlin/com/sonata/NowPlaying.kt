@@ -268,16 +268,16 @@ private fun WaveformScrubber(
                 .fillMaxSize()
                 .pointerInput(durationMs) {
                     detectTapGestures { offset ->
-                        scrubFraction = offset.x / size.width
-                        scrubFraction?.let {
-                            player.seekTo((it * durationMs).toLong())
-                            scrubFraction = null
+                        if (durationMs > 0) {
+                            val f = (offset.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                            player.seekTo((f * durationMs).toLong())
                         }
                     }
                 }
                 .semantics { contentDescription = "Waveform scrubber" },
         ) {
-            val fraction = scrubFraction ?: if (durationMs > 0) positionMs.toFloat() / durationMs else 0f
+            val fraction = scrubFraction
+                ?: (if (durationMs > 0) positionMs.toFloat() / durationMs else 0f).coerceIn(0f, 1f)
             val bars = waveform.ifEmpty { List(48) { 0.3f } }
             val barWidth = size.width / bars.size
             bars.forEachIndexed { i, peak ->

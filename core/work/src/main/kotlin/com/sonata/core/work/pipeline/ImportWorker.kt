@@ -131,6 +131,7 @@ class ImportWorker @AssistedInject constructor(
                 ),
             )
         } catch (t: Throwable) {
+            android.util.Log.e("SonataImport", "import failed", t)
             progress(ImportStage.FAILED, 1f, error = t.message ?: "Import failed")
             if (runAttemptCount < 4) {
                 Result.retry() // exponential backoff via the WorkManager policy

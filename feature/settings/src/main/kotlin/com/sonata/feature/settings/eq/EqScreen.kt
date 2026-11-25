@@ -128,7 +128,7 @@ fun EqScreen(
         when (tab) {
             0 -> BandEditor(
                 config = config,
-                selectedBand = selectedBand,
+                selectedBand = selectedBand.coerceIn(0, config.bands.lastIndex),
                 onSelectBand = { selectedBand = it },
                 onChange = { new -> dsp.update { new }; new },
             )
@@ -217,14 +217,14 @@ private fun BandEditor(
 @Composable
 private fun CompressorPanel(config: DspConfig, onChange: (DspConfig) -> Unit) {
     val c = config.compressor
-    Text("Threshold: ${c.thresholds[0]} dB")
-    Slider(c.thresholds[0], onValueChange = { v -> onChange(config.copy(compressor = c.copy(thresholds = listOf(v, v, v, v)))) }, valueRange = -60f..0f)
-    Text("Ratio: ${c.ratios[0]}:1")
-    Slider(c.ratios[0], onValueChange = { v -> onChange(config.copy(compressor = c.copy(ratios = listOf(v, v, v, v)))) }, valueRange = 1f..20f)
-    Text("Attack: ${c.attacks[0]} ms")
-    Slider(c.attacks[0].toFloat(), onValueChange = { v -> onChange(config.copy(compressor = c.copy(attacks = listOf(v.toInt(), v.toInt(), v.toInt(), v.toInt())))) }, valueRange = 1f..100f)
-    Text("Release: ${c.releases[0]} ms")
-    Slider(c.releases[0].toFloat(), onValueChange = { v -> onChange(config.copy(compressor = c.copy(releases = listOf(v.toInt(), v.toInt(), v.toInt(), v.toInt())))) }, valueRange = 20f..1000f)
+    Text("Threshold: ${c.thresholds.getOrElse(0) { -20f }} dB")
+    Slider(c.thresholds.getOrElse(0) { -20f }, onValueChange = { v -> onChange(config.copy(compressor = c.copy(thresholds = listOf(v, v, v, v)))) }, valueRange = -60f..0f)
+    Text("Ratio: ${c.ratios.getOrElse(0) { 3f }}:1")
+    Slider(c.ratios.getOrElse(0) { 3f }, onValueChange = { v -> onChange(config.copy(compressor = c.copy(ratios = listOf(v, v, v, v)))) }, valueRange = 1f..20f)
+    Text("Attack: ${c.attacks.getOrElse(0) { 20 }} ms")
+    Slider(c.attacks.getOrElse(0) { 20 }.toFloat(), onValueChange = { v -> onChange(config.copy(compressor = c.copy(attacks = listOf(v.toInt(), v.toInt(), v.toInt(), v.toInt())))) }, valueRange = 1f..100f)
+    Text("Release: ${c.releases.getOrElse(0) { 200 }} ms")
+    Slider(c.releases.getOrElse(0) { 200 }.toFloat(), onValueChange = { v -> onChange(config.copy(compressor = c.copy(releases = listOf(v.toInt(), v.toInt(), v.toInt(), v.toInt())))) }, valueRange = 20f..1000f)
     Text("Knee: ${c.knee} dB")
     Slider(c.knee, onValueChange = { v -> onChange(config.copy(compressor = c.copy(knee = v))) }, valueRange = 0f..12f)
 }
