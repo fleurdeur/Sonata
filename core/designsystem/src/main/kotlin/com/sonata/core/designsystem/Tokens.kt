@@ -47,7 +47,7 @@ object Type {
 }
 
 object Dimensions {
-    val bottomBarHeight = 64.dp
+    val bottomBarHeight = 80.dp
     val bottomBarInset = 12.dp
     val miniPlayerHeight = 64.dp
     val miniPlayerGap = 8.dp
@@ -62,5 +62,5 @@ object Dimensions {
     val handleWidth = 48.dp
     val nowPlayingCoverCorner = 24.dp
     /** Room for the floating bar, mini player and the FAB. */
-    val listBottomPadding = 180.dp
+    val listBottomPadding = 300.dp
 }

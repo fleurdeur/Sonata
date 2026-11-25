@@ -55,6 +55,46 @@ class PcmToolsTest {
     }
 
     @Test
+    fun `time stretch never leaves a silent tail`() {
+        val tone = sine(3.0, 220.0)
+        val slower = PcmTools.timeStretch(tone, 0.8f)
+        val tail = PcmTools.rms(slower, slower.size - sr / 2, slower.size)
+        assertTrue("tail must still contain audio", tail > 0.1)
+    }
+
+    @Test
+    fun `time stretch slows down without dropping pitch`() {
+        val tone = sine(2.0, 330.0)
+        val slower = PcmTools.timeStretch(tone, 0.8f)
+        assertEquals(330.0, zeroCrossHz(slower), 20.0)
+        assertEquals(tone.size / 0.8, slower.size.toDouble(), 2_000.0)
+    }
+
+    @Test
+    fun `time stretch keeps the beat period it was asked for`() {
+        val period = (sr * 60.0 / 120.0).toInt() // 120 BPM click track
+        val pcm = ShortArray(sr * 8) { i ->
+            val phase = i % period
+            if (phase < 40) (20_000 * (1.0 - phase / 40.0)).toInt().toShort() else 0
+        }
+        val faster = PcmTools.timeStretch(pcm, 1.25f)
+        val peaks = mutableListOf<Int>()
+        var i = (sr * 0.5).toInt()
+        while (i < faster.size) {
+            if (abs(faster[i].toInt()) > 6_000) {
+                peaks += i
+                i += (period * 0.6).toInt()
+            } else {
+                i++
+            }
+        }
+        assertTrue("expected several beats, got ${peaks.size}", peaks.size >= 5)
+        val intervals = peaks.zipWithNext { a, b -> b - a }.drop(1)
+        val average = intervals.average()
+        assertEquals(period / 1.25, average, 300.0)
+    }
+
+    @Test
     fun `resampling shifts pitch with tempo`() {
         val tone = sine(2.0, 440.0)
         val nightcore = PcmTools.resample(tone, 1.25f)

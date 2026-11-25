@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,7 +36,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -108,12 +109,13 @@ class AppViewModel @Inject constructor(
 fun SonataApp(
     pendingShares: List<String>,
     onConsumedShare: () -> Unit,
+    initialOnboardingDone: Boolean,
 ) {
     val appViewModel: AppViewModel = hiltViewModel()
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "home"
-    val settings by appViewModel.settings.collectAsState()
+    var onboardingDone by remember { mutableStateOf(initialOnboardingDone) }
     val radius = LocalRadius.current
     val hazeState = rememberHazeState()
 
@@ -127,13 +129,14 @@ fun SonataApp(
         }
     }
 
-    val chromeVisible = route != "nowPlaying" && settings.onboardingDone
+    val chromeVisible = route != "nowPlaying" && onboardingDone
 
     androidx.compose.runtime.CompositionLocalProvider(LocalHazeState provides hazeState) {
         Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier
                     .fillMaxSize()
+                    .statusBarsPadding()
                     .hazeSource(hazeState),
             ) {
                 AppNavHost(navController, onImport = { showImport = true })
@@ -144,6 +147,7 @@ fun SonataApp(
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
+                        .navigationBarsPadding()
                         .padding(horizontal = Dimensions.bottomBarInset, vertical = Dimensions.bottomBarInset),
                 ) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -207,8 +211,13 @@ fun SonataApp(
                 }
             }
 
-            if (!settings.onboardingDone) {
-                OnboardingPager(onFinish = { appViewModel.finishOnboarding() })
+            if (!onboardingDone) {
+                OnboardingPager(
+                    onFinish = {
+                        onboardingDone = true
+                        appViewModel.finishOnboarding()
+                    },
+                )
             }
         }
     }

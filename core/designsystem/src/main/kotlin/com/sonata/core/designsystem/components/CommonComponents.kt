@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -130,10 +131,10 @@ fun SoundRow(
     Row(
         modifier
             .fillMaxWidth()
-            .height(Dimensions.soundRowHeight)
+            .heightIn(min = Dimensions.soundRowHeight)
             .clip(RoundedCornerShape(LocalRadius.current.sm.dp))
             .then(tap)
-            .padding(horizontal = LocalSpacing.current.xsDp),
+            .padding(horizontal = LocalSpacing.current.xsDp, vertical = LocalSpacing.current.xsDp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(LocalSpacing.current.smDp),
     ) {

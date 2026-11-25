@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -123,8 +125,10 @@ fun NowPlayingScreen(
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = spacing.lgDp),
+            .padding(horizontal = spacing.lgDp)
+            .padding(bottom = spacing.xlDp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(
@@ -253,7 +257,9 @@ fun NowPlayingScreen(
         Spacer(Modifier.height(spacing.smDp))
 
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(spacing.xsDp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

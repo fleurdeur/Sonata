@@ -15,13 +15,15 @@ No account, no ads, no analytics, no uploads. Everything lives on the phone.
 2. Sonata reads the post through TikTok's public mobile endpoint (no login, no
    signatures), saves the video to its cache and extracts the audio track with
    MediaCodec.
-3. It measures tempo, key and reverb tail on the clip, then looks for the full
-   sound behind the post. When the sound is longer than the clip, that file is
-   downloaded and rendered as the track; otherwise the clip is looped to a
-   complete 2-minute song with equal-power crossfades at every join.
-4. Tempo, pitch character, reverb and bass are matched from the clip, the result
-   is peak-normalised, written as AAC and added to the library with cover,
-   waveform, BPM, key and effect tags ("nightcore", "slowed", "reverb", …).
+3. It looks for the full sound behind the post. When the sound is longer than
+   the clip it is downloaded; otherwise the clip is looped to a complete
+   2-minute song with equal-power crossfades at every join.
+4. On the full sound, the clip's onset envelope is matched at every plausible
+   speed (0.75×–1.5×), so a sped-up edit stays sped up instead of being slowed
+   down by a half-time tempo reading. Pitch follows only when the key shift
+   agrees with the detected speed; if no match is convincing the song keeps its
+   own tempo. The result is peak-normalised, written as AAC and added to the
+   library with cover, waveform, BPM, key and effect tags.
 
 The import runs in WorkManager (it survives leaving the app), shows its real
 stage and progress in the import sheet, can be cancelled, and retries once with

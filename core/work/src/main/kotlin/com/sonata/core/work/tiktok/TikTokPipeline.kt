@@ -2,6 +2,7 @@ package com.sonata.core.work.tiktok
 
 import com.sonata.core.audio.render.EffectSpec
 import com.sonata.core.audio.render.PcmTools
+import com.sonata.core.audio.render.SpeedEstimator
 import com.sonata.core.audio.render.TrackRenderer
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.extractor.tiktok.MediaDownloader
@@ -71,7 +72,6 @@ class TikTokPipeline @Inject constructor(
         if (clipPcm.isEmpty()) throw IllegalStateException("This video has no audible track")
 
         onStage(ImportStage.ANALYZING, 0.62f, "Analysing the sound")
-        val clipBpm = AudioAnalysis.detectBpm(clipPcm, PcmTools.SAMPLE_RATE)
         val clipKey = AudioAnalysis.detectKey(clipPcm, PcmTools.SAMPLE_RATE)
         val tailRatio = PcmTools.reverbTailRatio(clipPcm)
         val keywords = "${video.musicTitle.orEmpty()} ${video.description}".lowercase()
@@ -79,7 +79,11 @@ class TikTokPipeline @Inject constructor(
         val fullFile = downloadFullSound(video, clipPcm, onStage)
         val fullPcm = fullFile?.let { file ->
             onStage(ImportStage.ANALYZING, 0.78f, "Matching the full song")
-            audioStore.extractToPcm(file.absolutePath).takeIf { it.isNotEmpty() }
+            // A broken or unsupported full-song file must not lose the import;
+            // the clip is still usable and will be looped below.
+            runCatching { audioStore.extractToPcm(file.absolutePath) }
+                .getOrNull()
+                ?.takeIf { it.isNotEmpty() }
         }
 
         val coverPath = video.coverUrl?.let { url ->
@@ -92,7 +96,7 @@ class TikTokPipeline @Inject constructor(
 
         onStage(ImportStage.RENDERING, 0.86f, "Rendering the track")
         val track = if (fullPcm != null) {
-            val effect = detectEffect(clipKey, fullPcm, clipBpm, tailRatio, keywords)
+            val effect = detectEffect(clipKey, fullPcm, clipPcm, tailRatio, keywords)
             val trimmed = trimSilence(fullPcm)
             val rendered = TrackRenderer.render(
                 source = trimmed,
@@ -115,7 +119,7 @@ class TikTokPipeline @Inject constructor(
             // loop it into a full-length track instead of shipping a 15s file.
             val targetMs = if (clipPcm.size < 90 * PcmTools.SAMPLE_RATE) 120_000L
             else clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
-            val effect = keywordEffect(keywords)
+            val effect = keywordEffect()
             val rendered = TrackRenderer.render(
                 source = trimSilence(clipPcm),
                 spec = effect,
@@ -149,7 +153,7 @@ class TikTokPipeline @Inject constructor(
         if (video.isOriginalSound) return null
         val clipMs = clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
         // Only worth it when the sound is meaningfully longer than the clip.
-        if (video.musicDurationMs in 1..(clipMs + 15_000)) return null
+        if (video.musicDurationMs in 1..clipMs) return null
         val file = audioStore.cacheFile("tiktok_music_${video.awemeId}.m4a")
         return runCatching {
             if (!file.exists() || file.length() == 0L) {
@@ -163,41 +167,53 @@ class TikTokPipeline @Inject constructor(
     }
 
     /**
-     * Recovers the edit from the clip: tempo ratio against the original song,
-     * whether the pitch moved with it, the reverb tail and bass character.
+     * Recovers the edit from the clip. Speed comes from matching the clip's
+     * onset envelope against the long sound at several candidate speeds, never
+     * from a beat counter that can report half or double tempo. If the match is
+     * not convincing the song is left at its own tempo.
      */
     private fun detectEffect(
         clipKey: Int,
         fullPcm: ShortArray,
-        clipBpm: Int,
+        clipPcm: ShortArray,
         tailRatio: Double,
         keywords: String,
     ): EffectSpec {
-        val fullBpm = AudioAnalysis.detectBpm(fullPcm, PcmTools.SAMPLE_RATE)
-        var speed = if (fullBpm in 40..220 && clipBpm in 40..220) clipBpm.toFloat() / fullBpm else 1f
-        if (speed !in 0.75f..1.4f || abs(speed - 1f) < 0.02f) speed = 1f
+        val estimate = SpeedEstimator.estimate(clipPcm, fullPcm, PcmTools.SAMPLE_RATE)
+        val speed = estimate.speed
 
         val fullKey = AudioAnalysis.detectKey(fullPcm, PcmTools.SAMPLE_RATE)
         val semitones = PcmTools.semitoneDelta(fullKey, clipKey)
         val expected = 12f * log2(speed)
-        val keywordNightcore = keywords.contains("nightcore") || keywords.contains("sped up + pitch")
+        val saysSped = keywords.contains("sped up") || keywords.contains("speed up") ||
+            keywords.contains("nightcore") || keywords.contains("speedup")
+        val saysSlowed = keywords.contains("slowed") || keywords.contains("slow +") ||
+            keywords.contains("slowed + reverb")
         val coupled = when {
             speed == 1f -> false
-            keywordNightcore -> true
-            abs(semitones - expected) <= 1.2f -> true
-            else -> keywords.contains("slowed + reverb").not() && abs(semitones) >= 1 &&
-                abs(semitones - expected) < 2.2f
+            speed > 1f && saysSped -> true
+            speed < 1f && saysSlowed -> true
+            abs(semitones - expected) <= 1.5f && abs(semitones) >= 1 -> true
+            else -> false
         }
 
-        var reverb = when {
-            tailRatio >= 0.55 -> 0.34f
-            tailRatio >= 0.42 -> 0.22f
-            tailRatio >= 0.34 -> 0.12f
+        // When the long sound is the same version as the clip it already carries
+        // the edit's reverb and bass. Adding them again is what made imports muddy.
+        // At the same tempo there is nothing to reconstruct either, so leave the
+        // song untouched instead of guessing an effect from its tail.
+        val alreadyProcessed = estimate.sameRecording || speed == 1f
+        var reverb = if (alreadyProcessed) 0f else when {
+            tailRatio >= 0.55 -> 0.30f
+            tailRatio >= 0.42 -> 0.18f
+            tailRatio >= 0.34 -> 0.10f
             else -> 0f
         }
-        if (keywords.contains("reverb") || keywords.contains("slowed + reverb")) reverb = maxOf(reverb, 0.28f)
-
-        val bass = if (keywords.contains("bass boost") || keywords.contains("bass boosted")) 5f else 0f
+        if (!alreadyProcessed && (keywords.contains("reverb") || keywords.contains("slowed + reverb"))) {
+            reverb = maxOf(reverb, 0.22f)
+        }
+        val bass = if (!alreadyProcessed &&
+            (keywords.contains("bass boost") || keywords.contains("bass boosted"))
+        ) 4f else 0f
         return EffectSpec(speed = speed, pitchCoupled = coupled, reverbMix = reverb, bassDb = bass)
     }
 
@@ -206,9 +222,10 @@ class TikTokPipeline @Inject constructor(
      * baked in, so no reverb is added again. A small lift restores the low end
      * lost in the mono downmix when the metadata says the sound was boosted.
      */
-    private fun keywordEffect(keywords: String): EffectSpec {
-        val bass = if (keywords.contains("bass boost") || keywords.contains("bass boosted")) 1.5f else 0f
-        return EffectSpec(speed = 1f, pitchCoupled = false, reverbMix = 0f, bassDb = bass)
+    private fun keywordEffect(): EffectSpec {
+        // The clip is the finished audio and already contains its own bass and
+        // reverb. Processing it again only distorts it.
+        return EffectSpec(speed = 1f, pitchCoupled = false, reverbMix = 0f, bassDb = 0f)
     }
 
     private fun trimSilence(pcm: ShortArray): ShortArray {

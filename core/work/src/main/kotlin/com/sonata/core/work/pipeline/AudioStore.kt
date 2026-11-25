@@ -127,7 +127,7 @@ class AudioStore @Inject constructor(
                 val sourceRate = audioFormat.intOr(MediaFormat.KEY_SAMPLE_RATE, 44_100)
                 val channels = audioFormat.intOr(MediaFormat.KEY_CHANNEL_COUNT, 1).coerceAtLeast(1)
                 val durationUs = audioFormat.longOr(MediaFormat.KEY_DURATION, 0L)
-                val limitSamples = (sourceRate.toLong() * maxDurationMs / 1000).toInt()
+                var limitSamples = (sourceRate.toLong() * maxDurationMs / 1000).toInt()
 
                 var decoder = MediaCodec.createDecoderByType(mime)
                 decoder.configure(audioFormat, null, null, 0)
@@ -140,6 +140,10 @@ class AudioStore @Inject constructor(
                 var sawInputEos = false
                 var sawOutputEos = false
                 var outputChannels = channels
+                // The decoder may output at a different rate than the container
+                // declares (HE-AAC doubles it via SBR). Using the declared rate
+                // there would play the whole track at half speed.
+                var outputRate = sourceRate
 
                 while (!sawOutputEos) {
                     if (!sawInputEos) {
@@ -161,6 +165,8 @@ class AudioStore @Inject constructor(
                     val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10_000)
                     if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         outputChannels = decoder.outputFormat.intOr(MediaFormat.KEY_CHANNEL_COUNT, channels)
+                        outputRate = decoder.outputFormat.intOr(MediaFormat.KEY_SAMPLE_RATE, outputRate)
+                        limitSamples = (outputRate.toLong() * maxDurationMs / 1000).toInt()
                     } else if (outIndex >= 0) {
                         if (bufferInfo.size > 0) {
                             val buffer = decoder.getOutputBuffer(outIndex)!!
@@ -193,7 +199,7 @@ class AudioStore @Inject constructor(
                     offset += chunk.size
                 }
                 val mono = downmix(interleaved, outputChannels)
-                return resample(mono, sourceRate, PcmTools.SAMPLE_RATE)
+                return resample(mono, outputRate, PcmTools.SAMPLE_RATE)
             }
         } finally {
             codec?.let { runCatching { it.stop() }; runCatching { it.release() } }
@@ -216,15 +222,31 @@ class AudioStore @Inject constructor(
     private fun resample(pcm: ShortArray, from: Int, to: Int): ShortArray {
         if (from == to || pcm.isEmpty()) return pcm
         val ratio = to.toDouble() / from
-        val outLen = (pcm.size * ratio).toInt().coerceAtLeast(1)
+        // Decimating without a filter folds high frequencies back into the
+        // audible band. A one-pole low-pass at 45% of the target rate is enough
+        // to keep cymbals and vocals from turning harsh.
+        val source = if (from > to) {
+            val cutoff = 0.45 * to
+            val alpha = 1.0 - kotlin.math.exp(-2.0 * kotlin.math.PI * cutoff / from)
+            val filtered = ShortArray(pcm.size)
+            var state = pcm[0].toDouble()
+            for (i in pcm.indices) {
+                state += alpha * (pcm[i] - state)
+                filtered[i] = state.toInt().coerceIn(-32768, 32767).toShort()
+            }
+            filtered
+        } else {
+            pcm
+        }
+        val outLen = (source.size * ratio).toInt().coerceAtLeast(1)
         val out = ShortArray(outLen)
         for (i in 0 until outLen) {
             val src = i / ratio
             val i0 = src.toInt()
             val frac = src - i0
-            val a = pcm[i0.coerceIn(0, pcm.size - 1)].toDouble()
-            val b = pcm[(i0 + 1).coerceIn(0, pcm.size - 1)].toDouble()
-            out[i] = (a + (b - a) * frac).toInt().toShort()
+            val a = source[i0.coerceIn(0, source.size - 1)].toDouble()
+            val b = source[(i0 + 1).coerceIn(0, source.size - 1)].toDouble()
+            out[i] = (a + (b - a) * frac).toInt().coerceIn(-32768, 32767).toShort()
         }
         return out
     }

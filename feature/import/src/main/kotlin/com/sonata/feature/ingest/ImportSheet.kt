@@ -16,10 +16,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -43,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -175,6 +177,7 @@ fun ImportSheet(
     Column(
         Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.mdDp, vertical = spacing.smDp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -254,16 +257,15 @@ fun ImportSheet(
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.padding(top = spacing.mdDp, bottom = spacing.xsDp),
             )
-            LazyColumn(
-                Modifier.heightIn(max = 260.dp),
-                verticalArrangement = Arrangement.spacedBy(spacing.xsDp),
-            ) {
-                items(jobs, key = { it.id }) { job ->
-                    ImportRow(
-                        job = job,
-                        onCancel = { viewModel.cancel(job.id) },
-                        onOpen = { job.soundId?.let { id -> onOpenSound(id) } },
-                    )
+            Column(verticalArrangement = Arrangement.spacedBy(spacing.xsDp)) {
+                jobs.forEach { job ->
+                    key(job.id) {
+                        ImportRow(
+                            job = job,
+                            onCancel = { viewModel.cancel(job.id) },
+                            onOpen = { job.soundId?.let { id -> onOpenSound(id) } },
+                        )
+                    }
                 }
             }
         }

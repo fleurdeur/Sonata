@@ -154,46 +154,68 @@ object PcmTools {
     fun timeStretch(pcm: ShortArray, speed: Float, sampleRate: Int = SAMPLE_RATE): ShortArray {
         require(speed > 0f) { "speed must be positive" }
         if (abs(speed - 1f) < 0.001f || pcm.size < 4096) return pcm
-        val frame = 1024
+        val frame = 2048
         val hopOut = frame / 2
-        val hopIn = (hopOut * speed).roundToInt().coerceAtLeast(1)
-        val expected = (pcm.size / speed).roundToInt().coerceAtLeast(frame)
-        val out = ShortArray(expected + frame)
+        val outLen = (pcm.size / speed).roundToInt().coerceAtLeast(1)
         val window = hann(frame)
-        val acc = DoubleArray(out.size)
+        val acc = DoubleArray(outLen + frame)
+        var previousIn = 0
         var outPos = 0
-        var searchCenter = 0
-        while (outPos + frame < out.size && searchCenter + frame < pcm.size) {
-            // WSOLA: look for the input segment near the natural continuation
-            // that best matches it, then overlap-add it with a Hann window.
-            var bestOffset = 0
+        // Keep the analysis position tied to the requested tempo. Searching a
+        // full hop around the previous frame lets the matcher cancel the speed
+        // change entirely; a small phase window keeps the tempo exact.
+        val tolerance = (sampleRate * 0.001).toInt().coerceIn(16, 48)
+        val stride = 4
+        while (outPos < outLen) {
+            val target = (outPos * speed).roundToInt()
+            if (target + frame > pcm.size) break
+            var bestSrc = target
             if (outPos > 0) {
-                var bestCost = Double.MAX_VALUE
-                for (offset in -hopIn..hopIn step 16) {
-                    val cand = searchCenter + offset
-                    if (cand < 0 || cand + frame >= pcm.size) continue
-                    var cost = 0.0
-                    var i = 0
-                    while (i < frame) {
-                        val d = pcm[cand + i].toDouble() - pcm[searchCenter + i].toDouble()
-                        cost += d * d
-                        i += 8
+                // The new frame's first half overlaps the previous output tail.
+                // Pick the nearby input offset that continues that waveform.
+                val natural = previousIn + hopOut
+                var best = Double.MAX_VALUE
+                var shift = -tolerance
+                while (shift <= tolerance) {
+                    val candidate = target + shift
+                    if (candidate >= 0 && candidate + frame <= pcm.size &&
+                        natural + hopOut <= pcm.size
+                    ) {
+                        var cost = 0.0
+                        var i = 0
+                        while (i < hopOut) {
+                            val d = pcm[candidate + i].toDouble() - pcm[natural + i].toDouble()
+                            cost += d * d
+                            i += stride
+                        }
+                        if (cost < best) {
+                            best = cost
+                            bestSrc = candidate
+                        }
                     }
-                    if (cost < bestCost) { bestCost = cost; bestOffset = offset }
+                    shift += stride
                 }
             }
-            val src = searchCenter + bestOffset
-            for (i in 0 until frame) {
-                acc[outPos + i] += sampleAt(pcm, src + i) * window[i]
+            val count = min(frame, outLen + frame - outPos)
+            for (i in 0 until count) {
+                acc[outPos + i] += sampleAt(pcm, bestSrc + i) * window[i]
             }
+            previousIn = bestSrc
             outPos += hopOut
-            searchCenter = src + hopOut
         }
-        for (i in acc.indices) {
-            out[i] = acc[i].roundToInt().coerceIn(-32768, 32767).toShort()
+
+        // The last few milliseconds can be shorter than one output hop; copy the
+        // matching source tail instead of leaving a silent hole.
+        if (outPos < outLen) {
+            val srcStart = (outPos * speed).toInt().coerceIn(0, pcm.size - 1)
+            for (i in outPos until outLen) {
+                acc[i] = pcm[(srcStart + i - outPos).coerceAtMost(pcm.size - 1)].toDouble()
+            }
         }
-        val trimmed = out.copyOfRange(0, min(out.size, (pcm.size / speed).roundToInt()))
-        return fade(trimmed, 3, 3, sampleRate)
+        val out = ShortArray(outLen) {
+            acc[it].roundToInt().coerceIn(-32768, 32767).toShort()
+        }
+        return fade(out, 3, 3, sampleRate)
     }
 
     /** Resampling pitch+tempo shift, the "nightcore / vinyl" character. */

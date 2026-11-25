@@ -5,11 +5,24 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.sonata.core.designsystem.SonataTheme
+import com.sonata.core.domain.repository.Settings
 import com.sonata.core.domain.repository.SettingsRepository
+import com.sonata.core.domain.repository.ThemeMode
 import com.sonata.core.extractor.tiktok.TikTokUrls
 import com.sonata.core.work.pipeline.ImportQueue
 import dagger.hilt.android.AndroidEntryPoint
@@ -42,23 +55,49 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         // A recreated activity receives the same intent again; importing it a
         // second time would duplicate every share.
         if (savedInstanceState == null) handleIntent(intent)
-        lifecycleScope.launch {
-            val settings = settingsRepository.settings
-            setContent {
-                val current by settings.collectAsState(initial = com.sonata.core.domain.repository.Settings())
-                val shares by pendingShare.collectAsState()
-                SonataTheme(
-                    themeMode = current.themeMode,
-                    accent = androidx.compose.ui.graphics.Color(current.accent),
-                    dynamicColor = current.dynamicColor,
+
+        val settings = settingsRepository.settings
+        setContent {
+            // Wait for the stored theme instead of composing a default one for a
+            // frame; otherwise every cold start flashes the intro or the wrong
+            // light/dark palette.
+            val current by produceState<Settings?>(initialValue = null) {
+                settings.collect { value = it }
+            }
+            val shares by pendingShare.collectAsState()
+            val themeMode = current?.themeMode ?: ThemeMode.SYSTEM
+            val dark = themeMode == ThemeMode.DARK ||
+                themeMode == ThemeMode.PURE_BLACK ||
+                (themeMode == ThemeMode.SYSTEM && isSystemInDarkTheme())
+            val view = LocalView.current
+            SideEffect {
+                val window = (view.context as android.app.Activity).window
+                WindowCompat.getInsetsController(window, view).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }
+            SonataTheme(
+                themeMode = themeMode,
+                accent = Color(current?.accent ?: 0xFF4B44C7.toInt()),
+                dynamicColor = current?.dynamicColor ?: true,
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
                 ) {
-                    SonataApp(
-                        pendingShares = shares,
-                        onConsumedShare = { _pendingShare.value = emptyList() },
-                    )
+                    current?.let { loaded ->
+                        SonataApp(
+                            pendingShares = shares,
+                            onConsumedShare = { _pendingShare.value = emptyList() },
+                            // Stored preferences are already present here.
+                            initialOnboardingDone = loaded.onboardingDone,
+                        )
+                    }
                 }
             }
         }
@@ -85,17 +124,17 @@ class MainActivity : ComponentActivity() {
                     Uri::class.java,
                 )
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                if (stream != null) {
+                val sharedUrl = text?.let(TikTokUrls::firstUrlIn)
+                if (sharedUrl != null) {
+                    // TikTok shares often attach the video file too. The link is
+                    // richer: it identifies the full sound behind the post.
+                    lifecycleScope.launch { enqueueLink(sharedUrl) }
+                } else if (stream != null) {
                     val mime = intent.type.orEmpty()
                     val kind = if (mime.startsWith("video/") || mime.startsWith("image/")) "Video" else "Sound"
                     lifecycleScope.launch { enqueueLocal(stream.toString(), kind) }
                 } else if (!text.isNullOrBlank()) {
-                    val url = TikTokUrls.firstUrlIn(text)
-                    if (url != null) {
-                        lifecycleScope.launch { enqueueLink(url) }
-                    } else {
-                        android.widget.Toast.makeText(this, "No link found in that share", android.widget.Toast.LENGTH_SHORT).show()
-                    }
+                    android.widget.Toast.makeText(this, "No link found in that share", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
 

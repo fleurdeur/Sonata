@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -62,7 +63,7 @@ fun MiniPlayerBar(
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(Dimensions.miniPlayerHeight)
+                .heightIn(min = Dimensions.miniPlayerHeight)
                 .backdropGlass(shape = radius.mdShape)
                 .clickable(onClick = onOpenNowPlaying)
                 .semantics { contentDescription = "Open now playing" },

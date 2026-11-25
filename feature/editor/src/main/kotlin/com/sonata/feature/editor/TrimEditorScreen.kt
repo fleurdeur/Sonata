@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -27,7 +26,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -53,6 +51,8 @@ fun TrimEditorScreen(
 ) {
     val spacing = LocalSpacing.current
     val haptics = LocalHapticFeedback.current
+    val accent = MaterialTheme.colorScheme.primary
+    val playhead = MaterialTheme.colorScheme.onBackground
     val durationMs = durationMs.coerceAtLeast(1L)
     var zoom by remember { mutableFloatStateOf(1f) }
     var selectionStart by remember { mutableLongStateOf(0L) }
@@ -72,11 +72,7 @@ fun TrimEditorScreen(
         ) {
             TextButton(onClick = onClose) { Text("Back") }
             Text(title, style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = {}) { Text("Undo") }
-                TextButton(onClick = {}) { Text("Redo") }
-                Button(onClick = {}) { Text("Save") }
-            }
+            TextButton(onClick = onClose) { Text("Done") }
         }
 
         var canvasWidth by remember { mutableStateOf(1f) }
@@ -113,7 +109,7 @@ fun TrimEditorScreen(
             bars.forEachIndexed { i, peak ->
                 val h = (peak.coerceIn(0f, 1f) * size.height).coerceAtLeast(2f)
                 drawRect(
-                    color = Color(0xFF6C5CE7).copy(alpha = 0.85f),
+                    color = accent.copy(alpha = 0.85f),
                     topLeft = Offset(i * barWidth, (size.height - h) / 2),
                     size = androidx.compose.ui.geometry.Size(barWidth * 0.8f, h),
                 )
@@ -122,13 +118,13 @@ fun TrimEditorScreen(
             val startFrac = selectionStart.toFloat() / durationMs
             val endFrac = selectionEnd.toFloat() / durationMs
             drawLine(
-                Color.White,
+                playhead,
                 Offset(startFrac * size.width, 0f),
                 Offset(startFrac * size.width, size.height),
                 strokeWidth = 3f,
             )
             drawLine(
-                Color.White.copy(alpha = 0.6f),
+                playhead.copy(alpha = 0.6f),
                 Offset(endFrac * size.width, 0f),
                 Offset(endFrac * size.width, size.height),
                 strokeWidth = 2f,
@@ -145,7 +141,7 @@ fun TrimEditorScreen(
             waveform.take(64).forEachIndexed { i, peak ->
                 val h = peak * size.height
                 drawRect(
-                    color = Color(0xFF6C5CE7).copy(alpha = 0.4f),
+                    color = accent.copy(alpha = 0.4f),
                     topLeft = Offset(i * (size.width / 64), size.height - h),
                     size = androidx.compose.ui.geometry.Size(size.width / 64 - 1, h),
                 )
@@ -170,45 +166,15 @@ fun TrimEditorScreen(
             }
         }
 
-        // Transport row
         Row(
             Modifier
                 .fillMaxWidth()
                 .padding(horizontal = spacing.mdDp),
             horizontalArrangement = Arrangement.spacedBy(spacing.smDp),
         ) {
-            OutlinedButton(onClick = {}) { Text("Play selection") }
-            OutlinedButton(onClick = {}) { Text("Loop selection") }
             OutlinedButton(onClick = { selectionStart = (selectionStart - 10).coerceAtLeast(0) }) { Text("−10 ms") }
             OutlinedButton(onClick = { selectionStart = (selectionStart + 10).coerceAtMost(durationMs) }) { Text("+10 ms") }
-        }
-
-        // Tool strip
-        Row(
-            Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(spacing.mdDp),
-            horizontalArrangement = Arrangement.spacedBy(spacing.smDp),
-        ) {
-            listOf(
-                "Fade in", "Fade out", "Normalize", "Reverse", "Speed", "Pitch",
-                "Split", "Merge", "Noise reduction", "Voice isolation", "Loop points",
-            ).forEach { tool ->
-                OutlinedButton(onClick = {}) { Text(tool) }
-            }
-        }
-
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(spacing.mdDp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-        ) {
-            Button(onClick = {}) { Text("Save as recipe") }
-            OutlinedButton(onClick = {}) { Text("Save as copy") }
-            OutlinedButton(onClick = { selectionStart = 0; selectionEnd = durationMs; autoTrimmed = false }) {
-                Text("Reset to original")
-            }
+            OutlinedButton(onClick = { selectionStart = 0; selectionEnd = durationMs }) { Text("Reset") }
         }
     }
 }
