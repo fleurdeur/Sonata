@@ -18,6 +18,11 @@ class LyricsRepositoryImplTest {
         override suspend fun get(soundId: Long): LyricsEntity? = stored
         override suspend fun upsert(lyrics: LyricsEntity) { stored = lyrics }
         override suspend fun delete(soundId: Long) { stored = null }
+        override suspend fun updateOffset(soundId: Long, offsetMs: Long) {
+            stored = stored?.copy(offsetMs = offsetMs)
+        }
+        override fun observeSoundIdsWithLyrics(): Flow<List<Long>> =
+            flowOf(listOfNotNull(stored?.soundId))
     }
 
     private class FakeProvider(

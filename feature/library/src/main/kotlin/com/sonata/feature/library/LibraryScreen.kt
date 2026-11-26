@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -65,6 +68,7 @@ import com.sonata.core.designsystem.components.SoundRow
 import com.sonata.core.designsystem.components.formatDuration
 import com.sonata.core.domain.model.Playlist
 import com.sonata.core.domain.model.Sound
+import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.domain.repository.PlaylistRepository
 import com.sonata.core.domain.repository.SoundRepository
 import com.sonata.core.media.connection.PlayerConnection
@@ -86,10 +90,21 @@ enum class LibrarySort(val label: String) {
     BPM("Tempo"),
 }
 
+enum class LibraryFilter(val label: String) {
+    ALL("All"),
+    FULL_SONGS("Full songs"),
+    CLIPS("Clips"),
+    WITH_LYRICS("With lyrics"),
+    WITH_BPM("Analysed"),
+    UNDER_MINUTE("Under 1 min"),
+    OVER_MINUTE("Over 1 min"),
+}
+
 @HiltViewModel
 class LibraryViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
     private val playlistRepository: PlaylistRepository,
+    private val lyricsRepository: LyricsRepository,
     private val player: PlayerConnection,
 ) : ViewModel() {
 
@@ -98,6 +113,9 @@ class LibraryViewModel @Inject constructor(
 
     val playlists: StateFlow<List<Playlist>> = playlistRepository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val soundsWithLyrics: StateFlow<Set<Long>> = lyricsRepository.observeSoundIdsWithLyrics()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     private val _openPlaylist = MutableStateFlow<Long?>(null)
     val openPlaylist: StateFlow<Long?> = _openPlaylist.asStateFlow()
@@ -138,6 +156,34 @@ class LibraryViewModel @Inject constructor(
         playlistRepository.delete(id)
         if (_openPlaylist.value == id) _openPlaylist.value = null
     }
+
+    fun updateTags(sound: Sound, title: String, artist: String?, tags: List<String>) = viewModelScope.launch {
+        val newTitle = title.trim().take(120).ifBlank { sound.title }
+        val newArtist = artist?.trim()?.take(120)?.takeIf { it.isNotBlank() }
+        val changedIdentity = newTitle != sound.title || newArtist != sound.artist
+        soundRepository.upsert(
+            sound.copy(
+                title = newTitle,
+                artist = newArtist,
+                tags = tags.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(12),
+            ),
+        )
+        if (changedIdentity) {
+            val speed = sound.tags.firstOrNull { Regex("""^\d+(\.\d+)?x$""").matches(it) }
+                ?.dropLast(1)
+                ?.toFloatOrNull()
+                ?: 1f
+            runCatching {
+                lyricsRepository.refresh(
+                    soundId = sound.id,
+                    title = newTitle,
+                    artist = newArtist,
+                    durationMs = sound.durationMs,
+                    speed = speed,
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -155,24 +201,36 @@ fun LibraryScreen(
     val playlists by viewModel.playlists.collectAsState()
     val openPlaylist by viewModel.openPlaylist.collectAsState()
     val playlistSounds by viewModel.playlistSounds.collectAsState()
+    val lyricsIds by viewModel.soundsWithLyrics.collectAsState()
     val spacing = LocalSpacing.current
     val radius = LocalRadius.current
 
     var tab by remember { mutableStateOf(0) }
     var sort by remember { mutableStateOf(LibrarySort.RECENT) }
+    var filter by remember { mutableStateOf(LibraryFilter.ALL) }
     var sortMenu by remember { mutableStateOf(false) }
+    var editingSound by remember { mutableStateOf<Sound?>(null) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var confirmDelete by remember { mutableStateOf<Set<Long>?>(null) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
     var playlistPickerFor by remember { mutableStateOf<List<Long>?>(null) }
 
-    val sorted = remember(sounds, sort) {
+    val sorted = remember(sounds, sort, filter, lyricsIds) {
+        val filtered = when (filter) {
+            LibraryFilter.ALL -> sounds
+            LibraryFilter.FULL_SONGS -> sounds.filter { "full song" in it.tags }
+            LibraryFilter.CLIPS -> sounds.filter { "clip only" in it.tags }
+            LibraryFilter.WITH_LYRICS -> sounds.filter { it.id in lyricsIds }
+            LibraryFilter.WITH_BPM -> sounds.filter { it.bpm != null }
+            LibraryFilter.UNDER_MINUTE -> sounds.filter { it.durationMs in 1..59_999L }
+            LibraryFilter.OVER_MINUTE -> sounds.filter { it.durationMs >= 60_000L }
+        }
         when (sort) {
-            LibrarySort.RECENT -> sounds.sortedByDescending { it.addedAt }
-            LibrarySort.TITLE -> sounds.sortedBy { it.title.lowercase() }
-            LibrarySort.PLAYED -> sounds.sortedByDescending { it.playCount }
-            LibrarySort.BPM -> sounds.sortedBy { it.bpm ?: 0 }
+            LibrarySort.RECENT -> filtered.sortedByDescending { it.addedAt }
+            LibrarySort.TITLE -> filtered.sortedBy { it.title.lowercase() }
+            LibrarySort.PLAYED -> filtered.sortedByDescending { it.playCount }
+            LibrarySort.BPM -> filtered.sortedBy { it.bpm ?: 0 }
         }
     }
 
@@ -283,6 +341,21 @@ fun LibraryScreen(
             }
         }
 
+        if (tab == 0) {
+            LazyRow(
+                Modifier.fillMaxWidth().padding(bottom = spacing.xsDp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(LibraryFilter.entries, key = { it.name }) { option ->
+                    FilterChip(
+                        selected = filter == option,
+                        onClick = { filter = option },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+        }
+
         val selectedSounds = sorted.filter { it.id in selection }
         val allFavorite = selectedSounds.isNotEmpty() && selectedSounds.all { it.isFavorite }
 
@@ -307,6 +380,11 @@ fun LibraryScreen(
                         contentDescription = if (allFavorite) "Remove selected from favorites" else "Favorite selected",
                     )
                 }
+                if (selectedSounds.size == 1) {
+                    IconButton(onClick = { editingSound = selectedSounds.first() }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Edit tags")
+                    }
+                }
                 IconButton(onClick = { playlistPickerFor = selection.toList() }) {
                     Icon(Icons.Outlined.PlaylistAdd, contentDescription = "Add selected to playlist")
                 }
@@ -320,8 +398,14 @@ fun LibraryScreen(
         when (tab) {
             0 -> if (sorted.isEmpty()) {
                 EmptyState(
-                    title = "No sounds yet",
-                    message = "Import a file or share a TikTok video to Sonata.",
+                    title = if (filter == LibraryFilter.ALL) "No sounds yet" else "Nothing matches this filter",
+                    message = if (filter == LibraryFilter.ALL) {
+                        "Import a file or share a TikTok video to Sonata."
+                    } else {
+                        "Try another filter — your library is still intact."
+                    },
+                    primaryLabel = if (filter == LibraryFilter.ALL) null else "Show all",
+                    onPrimary = if (filter == LibraryFilter.ALL) null else ({ filter = LibraryFilter.ALL }),
                 )
             } else {
                 LazyColumn(
@@ -519,6 +603,54 @@ fun LibraryScreen(
             confirmButton = {
                 TextButton(onClick = { playlistPickerFor = null }) { Text("Close") }
             },
+        )
+    }
+
+    val editing = editingSound
+    if (editing != null) {
+        var title by remember(editing.id) { mutableStateOf(editing.title) }
+        var artist by remember(editing.id) { mutableStateOf(editing.artist.orEmpty()) }
+        var tagText by remember(editing.id) { mutableStateOf(editing.tags.joinToString(", ")) }
+        AlertDialog(
+            onDismissRequest = { editingSound = null },
+            title = { Text("Edit tags") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        singleLine = true,
+                        label = { Text("Title") },
+                    )
+                    OutlinedTextField(
+                        value = artist,
+                        onValueChange = { artist = it },
+                        singleLine = true,
+                        label = { Text("Artist") },
+                    )
+                    OutlinedTextField(
+                        value = tagText,
+                        onValueChange = { tagText = it },
+                        label = { Text("Tags (comma separated)") },
+                        supportingText = { Text("e.g. full song, live, gym") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.updateTags(
+                            sound = editing,
+                            title = title,
+                            artist = artist,
+                            tags = tagText.split(',').map { it.trim() }.filter { it.isNotBlank() },
+                        )
+                        editingSound = null
+                        selection = emptySet()
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { editingSound = null }) { Text("Cancel") } },
         )
     }
 }

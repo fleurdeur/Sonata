@@ -28,12 +28,15 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,16 +44,27 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sonata.core.domain.model.LyricLine
 import com.sonata.core.domain.model.Lyrics
+import kotlin.math.abs
+import kotlin.math.roundToLong
+import kotlinx.coroutines.delay
 
 /**
  * Apple Music-style animated lyrics: the active line grows and turns bright,
  * neighbours fade away, and the list glides to keep the current line centred.
- * Tapping any line seeks there.
+ * With enhanced LRC the current phrase is highlighted word by word.
+ *
+ * Manual scrolling pauses following for 2.5 seconds, then the list snaps back
+ * to the music. Tapping a line seeks to it, compensated by the saved offset.
  */
 @Composable
 fun LyricsPane(
@@ -61,6 +75,7 @@ fun LyricsPane(
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
     clipOnly: Boolean = false,
+    onOffsetChange: (Long) -> Unit = {},
 ) {
     if (loading && lyrics == null) {
         Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -151,10 +166,27 @@ fun LyricsPane(
 
     val listState = rememberLazyListState()
     val density = LocalDensity.current
-    val active = remember(lyrics.lines, positionMs) { lyrics.indexAt(positionMs).coerceAtLeast(0) }
-    LaunchedEffect(active) {
-        if (active >= 0) {
-            // Keep the current line near the middle of the page, not the top.
+    var follow by remember { mutableLongStateOf(1L) }
+    var offsetMs by remember(lyrics.soundId, lyrics.offsetMs) {
+        mutableLongStateOf(lyrics.offsetMs.coerceIn(-2_000L, 2_000L))
+    }
+    val unshifted = remember(lyrics) { lyrics.copy(offsetMs = 0) }
+    val active = remember(lyrics.lines, positionMs, offsetMs) {
+        unshifted.indexAt(positionMs - offsetMs).coerceAtLeast(0)
+    }
+
+    // A user drag pauses auto-follow; 2.5 s after the finger lifts, the list
+    // calmly returns to the line that is actually playing.
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            follow = 0L
+        } else {
+            delay(2_500)
+            follow = System.currentTimeMillis()
+        }
+    }
+    LaunchedEffect(active, follow) {
+        if (follow > 0L && active >= 0) {
             val shift = with(density) { 170.dp.roundToPx() }
             listState.animateScrollToItem(active, scrollOffset = -shift)
         }
@@ -173,12 +205,37 @@ fun LyricsPane(
                 letterSpacing = 1.4.sp,
             )
             Text(
-                lyrics.provider,
+                if (lyrics.hasWordTiming) lyrics.provider + " · word sync" else lyrics.provider,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(4.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "SYNC",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Slider(
+                value = offsetMs / 1_000f,
+                onValueChange = { offsetMs = (it * 1_000).roundToLong().coerceIn(-2_000L, 2_000L) },
+                onValueChangeFinished = { onOffsetChange(offsetMs) },
+                valueRange = -2f..2f,
+                steps = 39,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp)
+                    .semantics { contentDescription = "Lyric timing offset" },
+            )
+            Text(
+                (if (offsetMs >= 0) "+" else "") + String.format("%.1f", offsetMs / 1_000f) + "s",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -189,11 +246,17 @@ fun LyricsPane(
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             itemsIndexed(lyrics.lines) { index, line ->
+                val wordIndex = if (index == active) {
+                    unshifted.wordIndexAt(line, positionMs - offsetMs)
+                } else {
+                    -1
+                }
                 LyricLineRow(
-                    text = line.text,
+                    line = line,
                     active = index == active,
-                    distance = if (active >= 0) kotlin.math.abs(index - active) else 4,
-                    onClick = { onSeek(line.timeMs) },
+                    activeWord = wordIndex,
+                    distance = if (active >= 0) abs(index - active) else 4,
+                    onClick = { onSeek((line.timeMs + offsetMs).coerceAtLeast(0L)) },
                 )
             }
         }
@@ -202,8 +265,9 @@ fun LyricsPane(
 
 @Composable
 private fun LyricLineRow(
-    text: String,
+    line: LyricLine,
     active: Boolean,
+    activeWord: Int,
     distance: Int,
     onClick: () -> Unit,
 ) {
@@ -231,8 +295,33 @@ private fun LyricLineRow(
         animationSpec = tween(320),
         label = "lyricColor",
     )
+    val phraseColor = MaterialTheme.colorScheme.primary
+    val annotated: AnnotatedString? = remember(line.text, line.words, activeWord, active, phraseColor) {
+        if (!active || activeWord < 0 || line.words.isEmpty()) {
+            null
+        } else {
+            buildAnnotatedString {
+                var cursor = 0
+                line.words.forEachIndexed { index, word ->
+                    val at = line.text.indexOf(word.text, cursor).let { found ->
+                        if (found >= 0) found else cursor
+                    }
+                    if (at > cursor) append(line.text.substring(cursor, at))
+                    if (index == activeWord) {
+                        withStyle(SpanStyle(color = phraseColor, fontWeight = FontWeight.Bold)) {
+                            append(word.text)
+                        }
+                    } else {
+                        append(word.text)
+                    }
+                    cursor = (at + word.text.length).coerceAtMost(line.text.length)
+                }
+                if (cursor < line.text.length) append(line.text.substring(cursor))
+            }
+        }
+    }
     Text(
-        text = text,
+        text = annotated ?: AnnotatedString(line.text),
         color = color,
         fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
         fontSize = if (active) 26.sp else 21.sp,

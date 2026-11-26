@@ -30,4 +30,12 @@ interface LyricsRepository {
         durationMs: Long,
         speed: Float = 1f,
     ): Lyrics?
+
+    /** Saves the user's per-track timing calibration. */
+    suspend fun setOffset(soundId: Long, offsetMs: Long)
+
+    /** Restores a lyric sheet from a library backup without hitting providers. */
+    suspend fun save(soundId: Long, lyrics: Lyrics)
+
+    fun observeSoundIdsWithLyrics(): Flow<Set<Long>>
 }

@@ -49,4 +49,17 @@ class ImportQueue @Inject constructor(
         WorkManager.getInstance(context).cancelUniqueWork("import-$jobId")
         importRepository.cancel(jobId)
     }
+
+    /**
+     * Starts a fresh attempt for a failed job. Download caches are keyed by
+     * source identity, so completed network stages are reused.
+     */
+    suspend fun retry(job: ImportJob) {
+        importRepository.cancel(job.id)
+        enqueue(
+            sourceUri = job.sourceUri,
+            isLink = job.sourceUri.startsWith("http"),
+            title = job.title,
+        )
+    }
 }

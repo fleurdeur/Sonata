@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -95,6 +96,7 @@ class ImportViewModel @Inject constructor(
     fun importFile(uri: String) = viewModelScope.launch { queue.enqueue(uri, isLink = false) }
 
     fun cancel(jobId: String) = viewModelScope.launch { queue.cancel(jobId) }
+    fun retry(job: ImportJob) = viewModelScope.launch { queue.retry(job) }
 }
 
 /**
@@ -184,7 +186,7 @@ fun ImportSheet(
             Column(Modifier.weight(1f)) {
                 Text("Import", style = MaterialTheme.typography.headlineSmall)
                 Text(
-                    "Everything stays on this device",
+                    "Your library stays on this device",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -263,6 +265,7 @@ fun ImportSheet(
                         ImportRow(
                             job = job,
                             onCancel = { viewModel.cancel(job.id) },
+                            onRetry = { viewModel.retry(job) },
                             onOpen = { job.soundId?.let { id -> onOpenSound(id) } },
                         )
                     }
@@ -350,7 +353,7 @@ private fun ImportAction(
 }
 
 @Composable
-private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onOpen: () -> Unit) {
+private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onRetry: () -> Unit, onOpen: () -> Unit) {
     val spacing = LocalSpacing.current
     val finished = job.stage == ImportStage.DONE
     val failed = job.stage == ImportStage.FAILED
@@ -371,7 +374,7 @@ private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onOpen: () -> Unit) 
                     IconButton(onClick = onOpen) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = "Open imported sound")
                     }
-                } else {
+                } else if (!failed) {
                     IconButton(onClick = onCancel) {
                         Icon(Icons.Filled.Close, contentDescription = "Cancel import")
                     }
@@ -382,6 +385,48 @@ private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onOpen: () -> Unit) 
                 style = MaterialTheme.typography.bodySmall,
                 color = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (finished && job.fullSongVerified != null) {
+                val percent = ((job.matchConfidence ?: 0f) * 100).toInt().coerceIn(0, 100)
+                Text(
+                    if (job.fullSongVerified == true) {
+                        "Verified full song · " + percent + "% acoustic match"
+                    } else {
+                        "Kept the real clip · no confident full-song match"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (job.fullSongVerified == true) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            job.failure?.let { failure ->
+                Text(
+                    failure.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            if (failed) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onRetry) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("Retry", Modifier.padding(start = 6.dp))
+                    }
+                    TextButton(onClick = onCancel) { Text("Dismiss") }
+                }
+                job.diagnostics?.takeIf { it.isNotBlank() }?.let { diagnostics ->
+                    Text(
+                        diagnostics,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.72f),
+                        maxLines = 3,
+                    )
+                }
+            }
             if (!finished && !failed) {
                 LinearProgressIndicator(
                     progress = { job.progress.coerceIn(0f, 1f) },
@@ -395,13 +440,27 @@ private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onOpen: () -> Unit) 
     }
 }
 
-private fun ImportJob.stageLabel(): String = when (stage) {
-    ImportStage.QUEUED -> error?.let { "Waiting to retry: $it" } ?: "Queued"
-    ImportStage.RESOLVING -> "Reading the link"
-    ImportStage.DOWNLOADING -> "Downloading ${(progress * 100).toInt()}%"
-    ImportStage.EXTRACTING -> "Separating audio"
-    ImportStage.ANALYZING -> "Measuring tempo, key and levels"
-    ImportStage.RENDERING -> "Rendering the full track"
-    ImportStage.DONE -> "Ready · ${(progress * 100).toInt()}%"
-    ImportStage.FAILED -> error ?: "Import failed"
+private fun ImportJob.stageLabel(): String {
+    val base = when (stage) {
+        ImportStage.QUEUED -> "Queued"
+        ImportStage.FETCH_SOURCE -> "Fetching the source"
+        ImportStage.EXTRACT_AUDIO -> "Extracting audio"
+        ImportStage.IDENTIFY_SONG -> "Identifying the song"
+        ImportStage.FETCH_FULL_TRACK -> "Fetching the full track"
+        ImportStage.ALIGN_EDIT -> "Matching the edit effects"
+        ImportStage.ENCODE_AAC -> "Encoding the final audio"
+        ImportStage.FETCH_LYRICS -> "Downloading synced lyrics"
+        ImportStage.PERSIST_LIBRARY -> "Saving to your library"
+        ImportStage.DONE -> "Ready"
+        ImportStage.FAILED -> "Import failed"
+    }
+    return when {
+        stage == ImportStage.DONE -> base
+        stage == ImportStage.FAILED -> error ?: base
+        !error.isNullOrBlank() -> base + " · retrying"
+        progress > 0f && stage != ImportStage.QUEUED &&
+            stage != ImportStage.IDENTIFY_SONG && stage != ImportStage.ALIGN_EDIT ->
+            base + " · " + (progress * 100).toInt() + "%"
+        else -> base
+    }
 }

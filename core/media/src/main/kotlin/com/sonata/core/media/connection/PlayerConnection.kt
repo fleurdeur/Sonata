@@ -194,11 +194,7 @@ class PlayerConnection @Inject constructor(
                 .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
                 .build(),
         )
-        // Zero-gap clipping keeps infinite loops click-free.
-        .setClippingConfiguration(
-            MediaItem.ClippingConfiguration.Builder()
-                .setEndPositionMs(durationMs)
-                .build(),
-        )
+        // Never clip to metadata: a stale duration would cut the real ending
+        // off the file. ExoPlayer's own repeat mode handles seamless looping.
         .build()
 }

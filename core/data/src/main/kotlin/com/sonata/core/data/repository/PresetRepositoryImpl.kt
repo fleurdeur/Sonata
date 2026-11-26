@@ -4,6 +4,8 @@ import com.sonata.core.common.di.IoDispatcher
 import com.sonata.core.database.dao.PresetDao
 import com.sonata.core.database.entity.PresetEntity
 import com.sonata.core.domain.model.BandFilterType
+import com.sonata.core.domain.model.CompressorSettings
+import com.sonata.core.domain.model.LimiterSettings
 import com.sonata.core.domain.model.ParametricBand
 import com.sonata.core.domain.model.Preset
 import com.sonata.core.domain.model.PresetCategory
@@ -18,7 +20,31 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 @kotlinx.serialization.Serializable
-data class BandJson(val frequency: Float, val gain: Float, val q: Float)
+data class BandJson(
+    val frequency: Float,
+    val gain: Float,
+    val q: Float,
+    val type: String = "PEAK",
+    val enabled: Boolean = true,
+)
+
+@kotlinx.serialization.Serializable
+data class CompressorJson(
+    val crossovers: List<Float> = listOf(150f, 600f, 4000f),
+    val thresholds: List<Float> = listOf(-20f, -20f, -20f, -20f),
+    val ratios: List<Float> = listOf(3f, 3f, 3f, 3f),
+    val attacks: List<Int> = listOf(20, 20, 20, 20),
+    val releases: List<Int> = listOf(200, 200, 200, 200),
+    val knee: Float = 6f,
+)
+
+@kotlinx.serialization.Serializable
+data class LimiterJson(
+    val ceilingDb: Float = -1f,
+    val lookaheadMs: Int = 5,
+    val releaseMs: Int = 120,
+    val inputGainDb: Float = 0f,
+)
 
 @Singleton
 class PresetRepositoryImpl @Inject constructor(
@@ -57,8 +83,30 @@ class PresetRepositoryImpl @Inject constructor(
         bands = runCatching {
             json.decodeFromString(ListSerializer(BandJson.serializer()), bandsJson)
         }.getOrDefault(emptyList()).mapIndexed { i, b ->
-            ParametricBand(i, BandFilterType.PEAK, b.frequency, b.gain, b.q)
+            ParametricBand(
+                index = i,
+                type = runCatching { BandFilterType.valueOf(b.type) }.getOrDefault(BandFilterType.PEAK),
+                frequency = b.frequency,
+                gainDb = b.gain,
+                q = b.q,
+                enabled = b.enabled,
+            )
         },
+        compressor = compressorJson?.let { raw ->
+            runCatching {
+                val c = json.decodeFromString(CompressorJson.serializer(), raw)
+                CompressorSettings(c.crossovers, c.thresholds, c.ratios, c.attacks, c.releases, c.knee)
+            }.getOrNull()
+        },
+        limiter = limiterJson?.let { raw ->
+            runCatching {
+                val l = json.decodeFromString(LimiterJson.serializer(), raw)
+                LimiterSettings(l.ceilingDb, l.lookaheadMs, l.releaseMs, l.inputGainDb)
+            }.getOrNull()
+        },
+        effects = effects.split("|").mapNotNull { raw ->
+            runCatching { Preset.DspEffect.valueOf(raw) }.getOrNull()
+        }.toSet(),
         isFavorite = isFavorite,
     )
 
@@ -69,8 +117,21 @@ class PresetRepositoryImpl @Inject constructor(
         description = description,
         bandsJson = json.encodeToString(
             ListSerializer(BandJson.serializer()),
-            bands.map { BandJson(it.frequency, it.gainDb, it.q) },
+            bands.map { BandJson(it.frequency, it.gainDb, it.q, it.type.name, it.enabled) },
         ),
+        compressorJson = compressor?.let { c ->
+            json.encodeToString(
+                CompressorJson.serializer(),
+                CompressorJson(c.crossovers, c.thresholds, c.ratios, c.attacks, c.releases, c.knee),
+            )
+        },
+        limiterJson = limiter?.let { l ->
+            json.encodeToString(
+                LimiterJson.serializer(),
+                LimiterJson(l.ceilingDb, l.lookaheadMs, l.releaseMs, l.inputGainDb),
+            )
+        },
+        effects = effects.joinToString("|") { it.name },
         isFavorite = isFavorite,
     )
 }

@@ -35,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -290,6 +291,7 @@ private fun AppNavHost(
         }
         composable("settings/eq") {
             val settingsViewModel: com.sonata.feature.settings.SettingsViewModel = hiltViewModel()
+            val presets by settingsViewModel.presets.collectAsState()
             Column(
                 Modifier
                     .fillMaxSize()
@@ -299,7 +301,13 @@ private fun AppNavHost(
                 androidx.compose.material3.IconButton(onClick = { navController.popBackStack() }) {
                     Icon(Icons.Filled.ExpandMore, contentDescription = "Back")
                 }
-                com.sonata.feature.settings.eq.EqScreen(dsp = settingsViewModel.dsp)
+                com.sonata.feature.settings.eq.EqScreen(
+                    dsp = settingsViewModel.dsp,
+                    presets = presets,
+                    onApplyPreset = settingsViewModel::applyPreset,
+                    onSavePreset = settingsViewModel::savePreset,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

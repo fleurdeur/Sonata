@@ -21,7 +21,7 @@ import com.sonata.core.database.entity.SoundFtsEntity
 import com.sonata.core.database.entity.TransitionEntity
 
 @Database(
-    version = 2,
+    version = 3,
     exportSchema = true,
     entities = [
         SoundEntity::class,
@@ -46,10 +46,6 @@ abstract class SonataDatabase : RoomDatabase() {
     companion object {
         const val NAME = "sonata.db"
 
-        /**
-         * Adds the lyrics cache. A real migration, not a destructive wipe:
-         * users keep every imported sound when they update.
-         */
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
@@ -67,6 +63,22 @@ abstract class SonataDatabase : RoomDatabase() {
                         "ON UPDATE NO ACTION ON DELETE CASCADE )",
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_lyrics_soundId ON lyrics (soundId)")
+            }
+        }
+
+        /**
+         * Adds resumable import diagnostics and the per-track lyric offset.
+         * Both are additive and nullable/defaulted, so upgrading keeps the
+         * whole library intact.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE import_jobs ADD COLUMN failure TEXT")
+                db.execSQL("ALTER TABLE import_jobs ADD COLUMN diagnostics TEXT")
+                db.execSQL("ALTER TABLE import_jobs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE import_jobs ADD COLUMN fullSongVerified INTEGER")
+                db.execSQL("ALTER TABLE import_jobs ADD COLUMN matchConfidence REAL")
+                db.execSQL("ALTER TABLE lyrics ADD COLUMN offsetMs INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

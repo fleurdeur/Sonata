@@ -11,9 +11,15 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -69,8 +75,28 @@ fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
     val sounds by viewModel.sounds.collectAsState()
     val spacing = LocalSpacing.current
     var seedId by remember { mutableStateOf<Long?>(null) }
+    var manualIds by remember { mutableStateOf<List<Long>>(emptyList()) }
 
-    val order = remember(sounds, seedId) { harmonicOrder(sounds, seedId) }
+    val harmonic = remember(sounds, seedId) { harmonicOrder(sounds, seedId) }
+    val order = remember(harmonic, manualIds, sounds) {
+        if (manualIds.isEmpty()) {
+            harmonic
+        } else {
+            val byId = sounds.associateBy { it.id }
+            val arranged = manualIds.mapNotNull(byId::get)
+            val known = arranged.map { it.id }.toSet()
+            arranged + harmonic.filter { it.id !in known }
+        }
+    }
+    val isManual = manualIds.isNotEmpty()
+
+    fun move(from: Int, to: Int) {
+        if (from == to || from !in order.indices || to !in order.indices) return
+        val ids = order.map { it.id }.toMutableList()
+        val item = ids.removeAt(from)
+        ids.add(to, item)
+        manualIds = ids
+    }
 
     LazyColumn(
         Modifier
@@ -82,7 +108,11 @@ fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
         item {
             ScreenHeader(
                 title = "Mix",
-                subtitle = if (sounds.size < 2) "Add sounds to build a mix" else "${sounds.size} sounds in harmonic order",
+                subtitle = when {
+                    sounds.size < 2 -> "Add sounds to build a mix"
+                    isManual -> "${sounds.size} sounds · your custom order"
+                    else -> "${sounds.size} sounds in harmonic order"
+                },
             )
         }
         item {
@@ -95,11 +125,20 @@ fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
                         .heightIn(min = 48.dp),
                 ) { Text("Play the mix") }
                 Text(
-                    "Each next track is chosen for a small tempo step and a compatible Camelot key, so transitions stay smooth.",
+                    if (isManual) {
+                        "Use the arrows on any track to reorder the queue. Your order is what plays next."
+                    } else {
+                        "Each next track is chosen for a small tempo step and a compatible Camelot key. Reorder any track with the arrows."
+                    },
                     Modifier.padding(top = spacing.smDp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (isManual) {
+                    TextButton(onClick = { manualIds = emptyList() }) {
+                        Text("Back to harmonic order")
+                    }
+                }
             }
         }
         if (sounds.size < 2) {
@@ -117,15 +156,30 @@ fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
                     onClick = {
                         // Re-seed the path so the mix starts from this track.
                         seedId = sound.id
+                        manualIds = emptyList()
                         viewModel.play(harmonicOrder(sounds, sound.id), 0)
                     },
                     trailing = {
-                        Text(
-                            "${sound.bpm ?: 0} · ${sound.key?.camelot ?: "--"}",
-                            Modifier.padding(end = spacing.smDp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        val index = order.indexOf(sound)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                (sound.bpm ?: 0).toString() + " · " + (sound.key?.camelot ?: "--"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            IconButton(
+                                onClick = { move(index, index - 1) },
+                                enabled = index > 0,
+                            ) {
+                                Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up")
+                            }
+                            IconButton(
+                                onClick = { move(index, index + 1) },
+                                enabled = index < order.lastIndex,
+                            ) {
+                                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down")
+                            }
+                        }
                     },
                 )
             }

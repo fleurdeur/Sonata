@@ -10,6 +10,7 @@ import com.sonata.core.common.di.IoDispatcher
 import com.sonata.core.database.dao.SoundDao
 import com.sonata.core.database.entity.SoundEntity
 import com.sonata.core.database.entity.encodeWaveform
+import com.sonata.core.domain.model.ImportFailureKind
 import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.domain.model.MusicalKey
@@ -23,19 +24,25 @@ import com.sonata.core.work.tiktok.TikTokPipeline
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import java.io.File
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.security.MessageDigest
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 /**
- * The measured import pipeline, run as a foreground WorkManager task with
- * exponential backoff. One path for every entry point:
+ * One measured import pipeline for every entry point:
  *
- * RESOLVE -> DOWNLOAD -> EXTRACT (mono 44.1 kHz PCM) -> DEDUPE -> ANALYZE ->
- * RENDER -> STORE.
+ * FETCH_SOURCE -> EXTRACT_AUDIO -> IDENTIFY_SONG -> FETCH_FULL_TRACK ->
+ * ALIGN_EDIT -> ENCODE_AAC -> PERSIST_LIBRARY -> FETCH_LYRICS -> DONE.
  *
- * A shared TikTok link gets its own pipeline: the video is saved, its audio is
- * separated, the full song is fetched when available, the edit's effects are
- * measured and the finished track is rendered into app storage.
+ * Network downloads are atomic and cached by source identity, so a bounded
+ * WorkManager retry resumes from the last completed stage instead of fetching
+ * everything again. Failures carry a typed reason and a readable diagnostic.
  */
 @HiltWorker
 class ImportWorker @AssistedInject constructor(
@@ -55,10 +62,36 @@ class ImportWorker @AssistedInject constructor(
         val jobId = inputData.getString(KEY_JOB_ID) ?: return@withContext Result.failure()
         val sourceUri = inputData.getString(KEY_SOURCE_URI) ?: return@withContext Result.failure()
         val isLink = inputData.getBoolean(KEY_IS_LINK, false)
+        val storedJob = importRepository.get(jobId)
+        var currentStage = storedJob?.stage?.takeUnless { it.terminal } ?: ImportStage.QUEUED
+        var currentTitle = storedJob?.title.orEmpty()
+        val attempt = runAttemptCount + 1
 
-        suspend fun progress(stage: ImportStage, fraction: Float, title: String = "", error: String? = null) {
+        suspend fun progress(
+            stage: ImportStage,
+            fraction: Float,
+            title: String = "",
+            error: String? = null,
+            failure: ImportFailureKind? = null,
+            diagnostics: String? = null,
+            verified: Boolean? = null,
+            confidence: Float? = null,
+        ) {
+            if (title.isNotBlank()) currentTitle = title
+            currentStage = stage
             runCatching {
-                importRepository.update(ImportJob(jobId, stage, fraction, title, sourceUri, error))
+                importRepository.report(
+                    jobId = jobId,
+                    stage = stage,
+                    progress = fraction,
+                    title = currentTitle,
+                    error = error,
+                    failure = failure,
+                    diagnostics = diagnostics,
+                    attempt = attempt,
+                    fullSongVerified = verified,
+                    matchConfidence = confidence,
+                )
             }
         }
 
@@ -68,7 +101,6 @@ class ImportWorker @AssistedInject constructor(
                 isLink -> importLink(sourceUri, ::progress)
                 else -> importLocal(sourceUri, ::progress)
             }
-
             progress(ImportStage.DONE, 1f, result.title)
             Result.success(
                 workDataOf(
@@ -79,14 +111,29 @@ class ImportWorker @AssistedInject constructor(
                 ),
             )
         } catch (t: Throwable) {
-            android.util.Log.e("SonataImport", "import failed", t)
-            if (runAttemptCount < 2) {
-                // Keep the job visible as queued: WorkManager will retry with
-                // exponential backoff and the sheet shows the last error.
-                progress(ImportStage.QUEUED, 0f, error = friendlyError(t))
+            val failure = classify(t, currentStage)
+            val detail = diagnosticsFor(t, currentStage, attempt)
+            android.util.Log.e("SonataImport", "import failed at " + currentStage.name, t)
+            if (failure.retryable && attempt < MAX_ATTEMPTS) {
+                // Keep the stage visible: WorkManager retries with backoff and
+                // cached sources let the next attempt skip completed downloads.
+                progress(
+                    currentStage,
+                    0f,
+                    error = "Retrying automatically (" + attempt + " of " + (MAX_ATTEMPTS - 1) +
+                        "): " + friendlyError(t),
+                    failure = failure,
+                    diagnostics = detail,
+                )
                 Result.retry()
             } else {
-                progress(ImportStage.FAILED, 1f, error = friendlyError(t))
+                progress(
+                    ImportStage.FAILED,
+                    1f,
+                    error = friendlyError(t),
+                    failure = failure,
+                    diagnostics = detail,
+                )
                 Result.failure()
             }
         }
@@ -96,84 +143,161 @@ class ImportWorker @AssistedInject constructor(
 
     private suspend fun importTikTok(
         url: String,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
     ): Stored {
-        var lastTitle = ""
         val track = tiktokPipeline.process(url) { stage, fraction, title ->
-            if (title.isNotBlank()) lastTitle = title
-            progress(stage, fraction, title, null)
+            progress(stage, fraction, title, null, null, null, null, null)
         }
-        progress(ImportStage.ANALYZING, 0.92f, track.title, null)
+        progress(
+            ImportStage.ENCODE_AAC,
+            0.90f,
+            "Encoding " + track.title,
+            null,
+            null,
+            track.diagnostics,
+            track.fromFullSong,
+            track.matchConfidence,
+        )
         val file = audioStore.newSoundFile("m4a")
         val written = PcmFileWriter.write(track.pcm, PcmTools.SAMPLE_RATE, file)
-        return persist(
+        val stored = persist(
             pcm = track.pcm,
             file = written,
-            title = track.title.ifBlank { lastTitle },
+            title = track.title,
             artist = track.artist,
             source = "TIKTOK",
             coverPath = track.coverPath,
             tags = track.tags,
-            progress = progress,
             speed = track.effect.speed,
             fetchLyrics = track.fromFullSong,
+            verified = track.fromFullSong,
+            confidence = track.matchConfidence,
+            progress = progress,
         )
+        // The import is safely in the library; only now discard source caches.
+        track.cacheFiles.forEach { runCatching { it.delete() } }
+        return stored
     }
 
     // -------------------------------------------------------------- links
 
     private suspend fun importLink(
         url: String,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
     ): Stored {
-        progress(ImportStage.RESOLVING, 0.04f, "Resolving link", null)
+        progress(ImportStage.FETCH_SOURCE, 0.04f, "Resolving link", null, null, null, null, null)
         val resolver = resolvers.forUrl(url)
-            ?: throw IllegalArgumentException("No importer handles this link")
+            ?: throw ImportFailureException(ImportFailureKind.SOURCE_UNAVAILABLE, "No importer handles this link")
         val resolved = resolver.resolve(url) { fraction, label ->
-            kotlinx.coroutines.runBlocking { progress(ImportStage.DOWNLOADING, 0.08f + fraction * 0.42f, label, null) }
+            runBlocking {
+                progress(
+                    ImportStage.FETCH_SOURCE,
+                    0.06f + fraction * 0.30f,
+                    label,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                )
+            }
         }
-        val cache = audioStore.cacheFile("link_${System.currentTimeMillis()}")
-        progress(ImportStage.DOWNLOADING, 0.5f, "Saving audio", null)
-        downloader.download(resolved.audioUrl, cache) { fraction ->
-            kotlinx.coroutines.runBlocking { progress(ImportStage.DOWNLOADING, 0.5f + fraction * 0.15f, "Saving audio", null) }
+        val cache = audioStore.cacheFile("link_" + stableName(url) + ".media")
+        progress(ImportStage.FETCH_SOURCE, 0.40f, "Saving audio", null, null, null, null, null)
+        try {
+            if (!cache.isFile || cache.length() < 1_024L) {
+                downloader.download(resolved.audioUrl, cache) { fraction ->
+                    runBlocking {
+                        progress(
+                            ImportStage.FETCH_SOURCE,
+                            0.40f + fraction * 0.12f,
+                            "Saving audio",
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                        )
+                    }
+                }
+            }
+            val pcm = decode(cache.absolutePath, progress, 0.56f)
+            val title = resolved.title.ifBlank { "Imported sound" }
+            val stored = finishPcm(
+                pcm = pcm,
+                title = title,
+                artist = resolved.author,
+                source = "LINK",
+                coverPath = null,
+                tags = listOf("link"),
+                progress = progress,
+            )
+            cache.delete()
+            return stored
+        } catch (t: Throwable) {
+            // Keep the cache on failure so the next attempt resumes download.
+            throw t
         }
-        val pcm = decode(cache.absolutePath, progress, 0.7f)
-        val info = audioStore.info(cache.absolutePath)
-        val title = resolved.title.ifBlank { "Imported sound" }
-        cache.delete()
-        return finishPcm(
-            pcm = pcm,
-            encode = true,
-            title = title,
-            artist = resolved.author,
-            source = "LINK",
-            coverPath = null,
-            tags = listOf("link"),
-            progress = progress,
-        )
     }
 
     // -------------------------------------------------------------- local
 
     private suspend fun importLocal(
         uri: String,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
     ): Stored {
-        progress(ImportStage.EXTRACTING, 0.15f, "Reading file", null)
+        progress(ImportStage.FETCH_SOURCE, 0.05f, "Reading file", null, null, null, null, null)
         val info = audioStore.info(uri)
-        val pcm = decode(uri, progress, 0.35f)
+        val pcm = decode(uri, progress, 0.20f)
         val title = displayName(uri)
-        // Video shares (and anything with a picture) must become audio files.
         return if (info.hasVideo) {
             finishPcm(
-                pcm = pcm, encode = true, title = title, artist = null,
-                source = "SHARE", coverPath = null, tags = listOf("shared"), progress = progress,
+                pcm = pcm,
+                title = title,
+                artist = null,
+                source = "SHARE",
+                coverPath = null,
+                tags = listOf("shared"),
+                progress = progress,
             )
         } else {
             val stored = audioStore.store(uri)
             persist(
-                pcm = pcm, file = stored, title = title, artist = null,
-                source = "SHARE", coverPath = null, tags = listOf("shared"), progress = progress,
+                pcm = pcm,
+                file = stored,
+                title = title,
+                artist = null,
+                source = "SHARE",
+                coverPath = null,
+                tags = listOf("shared"),
+                progress = progress,
             )
         }
     }
@@ -182,27 +306,61 @@ class ImportWorker @AssistedInject constructor(
 
     private suspend fun finishPcm(
         pcm: ShortArray,
-        encode: Boolean,
         title: String,
         artist: String?,
         source: String,
         coverPath: String?,
         tags: List<String>,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
     ): Stored {
-        progress(ImportStage.RENDERING, 0.85f, "Writing track", null)
+        progress(ImportStage.ENCODE_AAC, 0.80f, "Encoding audio", null, null, null, null, null)
         val file = audioStore.newSoundFile("m4a")
         val written = PcmFileWriter.write(pcm, PcmTools.SAMPLE_RATE, file)
-        return persist(pcm, written, title, artist, source, coverPath, tags, progress, 1f)
+        return persist(
+            pcm = pcm,
+            file = written,
+            title = title,
+            artist = artist,
+            source = source,
+            coverPath = coverPath,
+            tags = tags,
+            progress = progress,
+        )
     }
 
     private suspend fun decode(
         path: String,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
         fraction: Float,
     ): ShortArray {
-        progress(ImportStage.EXTRACTING, fraction, "Extracting audio", null)
-        return audioStore.extractToPcm(path)
+        progress(ImportStage.EXTRACT_AUDIO, fraction, "Extracting audio", null, null, null, null, null)
+        return try {
+            audioStore.extractToPcm(path)
+        } catch (t: Throwable) {
+            throw if (t.message?.contains("truncated", ignoreCase = true) == true) {
+                ImportFailureException(ImportFailureKind.TRUNCATED_AUDIO, "The source audio stopped early", t)
+            } else {
+                ImportFailureException(ImportFailureKind.EXTRACTION_FAILED, "Could not decode this audio", t)
+            }
+        }
     }
 
     private suspend fun persist(
@@ -213,11 +371,22 @@ class ImportWorker @AssistedInject constructor(
         source: String,
         coverPath: String?,
         tags: List<String>,
-        progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
         speed: Float = 1f,
         fetchLyrics: Boolean = true,
+        verified: Boolean? = null,
+        confidence: Float? = null,
     ): Stored {
-        progress(ImportStage.ANALYZING, 0.93f, title, null)
+        progress(ImportStage.PERSIST_LIBRARY, 0.94f, title, null, null, null, verified, confidence)
         val fingerprint = AudioAnalysis.fingerprint(pcm, PcmTools.SAMPLE_RATE)
         val existing = soundDao.findByFingerprint(fingerprint)
         if (existing != null) {
@@ -245,12 +414,16 @@ class ImportWorker @AssistedInject constructor(
                 importStatus = "READY",
             ),
         )
-        val (silenceStart, silenceEnd) = AudioAnalysis.detectSilence(pcm, PcmTools.SAMPLE_RATE)
-        File(applicationContext.filesDir, "trim_suggestions").apply { mkdirs() }
-            .resolve(id.toString() + ".json")
-            .writeText("{\"start\":" + silenceStart + ",\"end\":" + silenceEnd + "}")
+        val (silenceStart, silenceEnd) = runCatching {
+            AudioAnalysis.detectSilence(pcm, PcmTools.SAMPLE_RATE)
+        }.getOrDefault(0L to durationMs)
+        runCatching {
+            File(applicationContext.filesDir, "trim_suggestions").apply { mkdirs() }
+                .resolve(id.toString() + ".json")
+                .writeText("{\"start\":" + silenceStart + ",\"end\":" + silenceEnd + "}")
+        }
         if (fetchLyrics && durationMs >= 30_000) {
-            progress(ImportStage.ANALYZING, 0.97f, "Downloading lyrics", null)
+            progress(ImportStage.FETCH_LYRICS, 0.97f, "Downloading lyrics", null, null, null, verified, confidence)
             runCatching {
                 lyricsRepository.getOrFetch(id, title, artist, durationMs, speed)
             }
@@ -258,12 +431,58 @@ class ImportWorker @AssistedInject constructor(
         return Stored(id, title, duplicate = false, trimStart = silenceStart, trimEnd = silenceEnd)
     }
 
-    private fun friendlyError(t: Throwable): String = when {
-        t is IllegalArgumentException -> t.message ?: "Unsupported file"
-        t is java.net.UnknownHostException -> "No internet connection"
-        t is java.net.SocketTimeoutException -> "The connection timed out"
-        t.message?.contains("HTTP 429") == true -> "TikTok is rate limiting. Try again in a minute."
-        else -> t.message?.take(160) ?: "Import failed"
+    private fun classify(t: Throwable, stage: ImportStage): ImportFailureKind {
+        if (t is ImportFailureException) return t.kind
+        val message = t.message.orEmpty()
+        return when {
+            t is UnknownHostException || t is ConnectException || t is SocketTimeoutException ||
+                t is SSLException || t is IOException && !message.contains("No space", true) ->
+                ImportFailureKind.NETWORK
+            message.contains("HTTP 429") || message.contains("rate limit", true) ->
+                ImportFailureKind.RATE_LIMITED
+            message.contains("HTTP 404") || message.contains("HTTP 410") ->
+                ImportFailureKind.SOURCE_UNAVAILABLE
+            message.contains("truncated", true) || message.contains("incomplete", true) ->
+                ImportFailureKind.TRUNCATED_AUDIO
+            message.contains("no audio", true) -> ImportFailureKind.NO_AUDIO
+            message.contains("no space", true) || t is OutOfMemoryError ->
+                ImportFailureKind.STORAGE
+            stage == ImportStage.EXTRACT_AUDIO -> ImportFailureKind.EXTRACTION_FAILED
+            else -> ImportFailureKind.UNKNOWN
+        }
+    }
+
+    private fun friendlyError(t: Throwable): String {
+        val kind = runCatching { classify(t, ImportStage.QUEUED) }.getOrDefault(ImportFailureKind.UNKNOWN)
+        return when (kind) {
+            ImportFailureKind.NETWORK -> "No internet connection. Your download cache is safe; retry when online."
+            ImportFailureKind.RATE_LIMITED -> "The source is rate limiting requests. Try again in a minute."
+            ImportFailureKind.SOURCE_UNAVAILABLE -> t.message?.take(160) ?: "This source is unavailable."
+            ImportFailureKind.NO_AUDIO -> "This source has no audible audio track."
+            ImportFailureKind.EXTRACTION_FAILED -> "The audio could not be decoded. Try another file."
+            ImportFailureKind.TRUNCATED_AUDIO -> "The audio ended early. Retry to finish the download."
+            ImportFailureKind.NO_RELIABLE_MATCH -> "No reliable full song was found; the real clip was kept."
+            ImportFailureKind.LOW_CONFIDENCE_MATCH -> "The full song match was not confident; the real clip was kept."
+            ImportFailureKind.STORAGE -> "There is not enough free storage for this import."
+            ImportFailureKind.CANCELLED -> "Import cancelled."
+            ImportFailureKind.UNKNOWN -> t.message?.take(160)?.takeIf { it.isNotBlank() } ?: "Import failed."
+        }
+    }
+
+    /** Local-only diagnostics; absolute paths and device names are stripped. */
+    private fun diagnosticsFor(t: Throwable, stage: ImportStage, attempt: Int): String {
+        val raw = (t::class.simpleName ?: "Error") + ": " + (t.message ?: "no message")
+        val safe = raw
+            .replace(Regex("""[A-Za-z]:\\[^\s"']+"""), "<local path>")
+            .replace(Regex("""/Users/[^\s"']+"""), "<local path>")
+            .replace(Regex("""/home/[^\s"']+"""), "<local path>")
+            .take(900)
+        return "stage=" + stage.name + " attempt=" + attempt + " " + safe
+    }
+
+    private fun stableName(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        return digest.take(8).joinToString("") { "%02x".format(it) }
     }
 
     /** "1654632929123-@user-video.mp4" -> "@user-video". */
@@ -294,5 +513,6 @@ class ImportWorker @AssistedInject constructor(
         const val KEY_DUPLICATE = "duplicate"
         const val KEY_TRIM_START = "trimStart"
         const val KEY_TRIM_END = "trimEnd"
+        private const val MAX_ATTEMPTS = 3
     }
 }

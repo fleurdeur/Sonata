@@ -128,6 +128,7 @@ class AudioStore @Inject constructor(
                 val channels = audioFormat.intOr(MediaFormat.KEY_CHANNEL_COUNT, 1).coerceAtLeast(1)
                 val durationUs = audioFormat.longOr(MediaFormat.KEY_DURATION, 0L)
                 var limitSamples = (sourceRate.toLong() * maxDurationMs / 1000).toInt()
+                val decodeStartedAt = android.os.SystemClock.elapsedRealtime()
 
                 var decoder = MediaCodec.createDecoderByType(mime)
                 decoder.configure(audioFormat, null, null, 0)
@@ -187,6 +188,9 @@ class AudioStore @Inject constructor(
                         sawOutputEos = true
                         sawInputEos = true
                     }
+                    if (android.os.SystemClock.elapsedRealtime() - decodeStartedAt > 120_000L) {
+                        throw IllegalStateException("Audio decoder stalled")
+                    }
                 }
                 decoder.stop()
                 decoder.release()
@@ -199,6 +203,14 @@ class AudioStore @Inject constructor(
                     offset += chunk.size
                 }
                 val mono = downmix(interleaved, outputChannels)
+                val hitLimit = collected >= limitSamples * outputChannels
+                val expectedMs = durationUs / 1_000L
+                val decodedMs = mono.size.toLong() * 1_000L / outputRate
+                if (!hitLimit && expectedMs > 3_000L && decodedMs + 2_000L < expectedMs) {
+                    throw IllegalStateException(
+                        "Audio was truncated: decoded " + decodedMs + "ms of " + expectedMs + "ms",
+                    )
+                }
                 return resample(mono, outputRate, PcmTools.SAMPLE_RATE)
             }
         } finally {
@@ -257,10 +269,23 @@ class AudioStore @Inject constructor(
     @WorkerThread
     fun store(uri: String): File {
         val outFile = newSoundFile()
-        context.contentResolver.openInputStream(android.net.Uri.parse(uri))!!.use { input ->
-            outFile.outputStream().use { input.copyTo(it) }
+        val part = File(outFile.parentFile, outFile.name + ".part")
+        try {
+            context.contentResolver.openInputStream(android.net.Uri.parse(uri))!!.use { input ->
+                part.outputStream().use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                }
+            }
+            if (!part.isFile || part.length() <= 0L) error("Source file is empty")
+            if (!part.renameTo(outFile)) {
+                part.copyTo(outFile, overwrite = true)
+                part.delete()
+            }
+            return outFile
+        } finally {
+            part.delete()
         }
-        return outFile
     }
 
     val soundDirectory: File get() = soundsDir

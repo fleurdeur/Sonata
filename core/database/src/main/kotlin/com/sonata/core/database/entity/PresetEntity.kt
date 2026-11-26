@@ -25,4 +25,9 @@ data class ImportJobEntity(
     val sourceUri: String = "",
     val error: String? = null,
     val soundId: Long? = null,
+    val failure: String? = null,
+    val diagnostics: String? = null,
+    val attempt: Int = 0,
+    val fullSongVerified: Boolean? = null,
+    val matchConfidence: Float? = null,
 )

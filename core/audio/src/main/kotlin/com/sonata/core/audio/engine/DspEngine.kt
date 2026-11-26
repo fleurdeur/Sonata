@@ -21,7 +21,9 @@ enum class EngineKind { DYNAMICS_PROCESSING, FRAMEWORK_FALLBACK, NONE }
  */
 interface DspEngine {
     val kind: EngineKind
-    fun attach(audioSessionId: Int)
+
+    /** Returns true only when the effect is actually attached and usable. */
+    fun attach(audioSessionId: Int): Boolean
     fun release()
     fun apply(config: DspConfig)
 }
@@ -91,8 +93,8 @@ class DynamicsProcessingEngine @Inject constructor() : DspEngine {
 
     private var dp: DynamicsProcessing? = null
 
-    override fun attach(audioSessionId: Int) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+    override fun attach(audioSessionId: Int): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
         release()
         runCatching {
             val config = DynamicsProcessing.Config.Builder(
@@ -100,11 +102,12 @@ class DynamicsProcessingEngine @Inject constructor() : DspEngine {
                 CHANNELS,
                 true, BANDS,   // pre-EQ
                 true, MBC_BANDS, // multiband compressor
-                true, BANDS,   // post-EQ
+                true, BANDS,   // post-EQ (left flat: output gain belongs to the limiter)
                 true,          // limiter
             ).build()
             dp = DynamicsProcessing(audioSessionId, 0, config)
         }.onFailure { dp = null }
+        return dp != null
     }
 
     override fun apply(config: DspConfig) {
@@ -115,11 +118,11 @@ class DynamicsProcessingEngine @Inject constructor() : DspEngine {
                 true,
                 !config.bypass,
                 0,
-                1f,
-                config.limiter.releaseMs.toFloat(),
+                config.limiter.lookaheadMs.toFloat().coerceIn(1f, 20f),
+                config.limiter.releaseMs.toFloat().coerceIn(20f, 500f),
                 10f,
-                config.limiter.ceilingDb,
-                config.outputGainDb,
+                config.limiter.ceilingDb.coerceIn(-20f, 0f),
+                (config.outputGainDb + config.limiter.inputGainDb).coerceIn(-15f, 15f),
             )
             engine.setLimiterAllChannelsTo(limiter)
 
@@ -130,13 +133,11 @@ class DynamicsProcessingEngine @Inject constructor() : DspEngine {
                     band.gainDb.coerceIn(-15f, 15f),
                 )
                 engine.setPreEqBandAllChannelsTo(index, eqBand)
+                // Post-EQ stays flat. Applying the same curve twice doubled
+                // every boost and made presets sound nothing like their graph.
                 engine.setPostEqBandAllChannelsTo(
                     index,
-                    DynamicsProcessing.EqBand(
-                        band.enabled && !config.bypass,
-                        band.frequency.coerceIn(20f, 20000f),
-                        config.outputGainDb.coerceIn(-15f, 15f),
-                    ),
+                    DynamicsProcessing.EqBand(false, band.frequency.coerceIn(20f, 20000f), 0f),
                 )
             }
             val c = config.compressor
@@ -176,13 +177,14 @@ class FallbackEngine @Inject constructor() : DspEngine {
     private var bassBoost: android.media.audiofx.BassBoost? = null
     private var loudness: LoudnessEnhancer? = null
 
-    override fun attach(audioSessionId: Int) {
+    override fun attach(audioSessionId: Int): Boolean {
         release()
         runCatching {
             equalizer = Equalizer(0, audioSessionId)
             bassBoost = android.media.audiofx.BassBoost(0, audioSessionId)
             loudness = LoudnessEnhancer(audioSessionId)
         }
+        return equalizer != null
     }
 
     override fun apply(config: DspConfig) {
@@ -204,9 +206,7 @@ class FallbackEngine @Inject constructor() : DspEngine {
             bassBoost?.setEnabled(config.enabled && !config.bypass)
             bassBoost?.setStrength(bassGain.coerceIn(0f, 15f).toInt().toShort())
             loudness?.setEnabled(config.enabled && !config.bypass)
-            if (config.outputGainDb > 0f) {
-                loudness?.setTargetGain((config.outputGainDb * 100).toInt())
-            }
+            loudness?.setTargetGain((config.outputGainDb.coerceAtLeast(0f) * 100).toInt())
         }
     }
 
@@ -223,8 +223,10 @@ class FallbackEngine @Inject constructor() : DspEngine {
 class DspManager @Inject constructor(
     private val dynamicsProcessingEngine: DynamicsProcessingEngine,
     private val fallbackEngine: FallbackEngine,
+    @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
 ) {
-    private val _state = kotlinx.coroutines.flow.MutableStateFlow(DspConfig())
+    private val prefs = context.getSharedPreferences("sonata_dsp", android.content.Context.MODE_PRIVATE)
+    private val _state = kotlinx.coroutines.flow.MutableStateFlow(loadConfig())
     val state: kotlinx.coroutines.flow.StateFlow<DspConfig> = _state
 
     private val _engineKind = kotlinx.coroutines.flow.MutableStateFlow(EngineKind.NONE)
@@ -233,25 +235,44 @@ class DspManager @Inject constructor(
     private var engine: DspEngine? = null
 
     fun attach(audioSessionId: Int) {
-        val chosen = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        var chosen: DspEngine = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             dynamicsProcessingEngine
         } else {
             fallbackEngine
         }
+        val attached = chosen.attach(audioSessionId)
+        if (!attached && chosen !== fallbackEngine) {
+            chosen.release()
+            chosen = fallbackEngine
+            if (!chosen.attach(audioSessionId)) {
+                chosen.release()
+                engine = null
+                _engineKind.value = EngineKind.NONE
+                return
+            }
+        } else if (!attached) {
+            chosen.release()
+            engine = null
+            _engineKind.value = EngineKind.NONE
+            return
+        }
         engine = chosen
         _engineKind.value = chosen.kind
-        chosen.attach(audioSessionId)
         chosen.apply(_state.value)
     }
 
     fun update(transform: (DspConfig) -> DspConfig) {
-        _state.value = transform(_state.value)
-        engine?.apply(_state.value)
+        val next = transform(_state.value)
+        _state.value = next
+        saveConfig(next)
+        engine?.apply(next)
     }
 
     fun applyPreset(preset: Preset) = update {
         it.copy(
             bands = preset.bands.ifEmpty { DspConfig.DEFAULT_BANDS },
+            compressor = preset.compressor ?: it.compressor,
+            limiter = preset.limiter ?: it.limiter,
             effects = preset.effects,
         )
     }
@@ -260,5 +281,123 @@ class DspManager @Inject constructor(
         engine?.release()
         engine = null
         _engineKind.value = EngineKind.NONE
+    }
+
+    private fun loadConfig(): DspConfig = runCatching {
+        val raw = prefs.getString(KEY_CONFIG, null) ?: return DspConfig()
+        val o = org.json.JSONObject(raw)
+        val bandsJson = o.optJSONArray("bands")
+        val bands = if (bandsJson == null) {
+            DspConfig.DEFAULT_BANDS
+        } else {
+            (0 until bandsJson.length()).mapNotNull { i ->
+                bandsJson.optJSONObject(i)?.let { b ->
+                    com.sonata.core.domain.model.ParametricBand(
+                        index = b.optInt("index", i),
+                        type = runCatching {
+                            com.sonata.core.domain.model.BandFilterType.valueOf(b.optString("type", "PEAK"))
+                        }.getOrDefault(com.sonata.core.domain.model.BandFilterType.PEAK),
+                        frequency = b.optDouble("frequency", 1000.0).toFloat(),
+                        gainDb = b.optDouble("gainDb", 0.0).toFloat(),
+                        q = b.optDouble("q", 1.0).toFloat(),
+                        enabled = b.optBoolean("enabled", true),
+                    )
+                }
+            }.ifEmpty { DspConfig.DEFAULT_BANDS }
+        }
+        val c = o.optJSONObject("compressor")
+        val l = o.optJSONObject("limiter")
+        val effects = o.optJSONArray("effects")?.let { array ->
+            (0 until array.length()).mapNotNull { i ->
+                runCatching {
+                    Preset.DspEffect.valueOf(array.optString(i))
+                }.getOrNull()
+            }.toSet()
+        }.orEmpty()
+        DspConfig(
+            enabled = o.optBoolean("enabled", true),
+            bypass = o.optBoolean("bypass", false),
+            bands = bands,
+            compressor = c?.let {
+                com.sonata.core.domain.model.CompressorSettings(
+                    crossovers = floats(c.optJSONArray("crossovers"), listOf(150f, 600f, 4000f)),
+                    thresholds = floats(c.optJSONArray("thresholds"), listOf(-20f, -20f, -20f, -20f)),
+                    ratios = floats(c.optJSONArray("ratios"), listOf(3f, 3f, 3f, 3f)),
+                    attacks = ints(c.optJSONArray("attacks"), listOf(20, 20, 20, 20)),
+                    releases = ints(c.optJSONArray("releases"), listOf(200, 200, 200, 200)),
+                    knee = c.optDouble("knee", 6.0).toFloat(),
+                )
+            } ?: com.sonata.core.domain.model.CompressorSettings(),
+            limiter = l?.let {
+                com.sonata.core.domain.model.LimiterSettings(
+                    ceilingDb = l.optDouble("ceilingDb", -1.0).toFloat(),
+                    lookaheadMs = l.optInt("lookaheadMs", 5),
+                    releaseMs = l.optInt("releaseMs", 120),
+                    inputGainDb = l.optDouble("inputGainDb", 0.0).toFloat(),
+                )
+            } ?: com.sonata.core.domain.model.LimiterSettings(),
+            outputGainDb = o.optDouble("outputGainDb", 0.0).toFloat(),
+            loudnessNormalization = o.optBoolean("loudnessNormalization", true),
+            effects = effects,
+        )
+    }.getOrDefault(DspConfig())
+
+    private fun saveConfig(config: DspConfig) {
+        runCatching {
+            val o = org.json.JSONObject()
+                .put("enabled", config.enabled)
+                .put("bypass", config.bypass)
+                .put("outputGainDb", config.outputGainDb.toDouble())
+                .put("loudnessNormalization", config.loudnessNormalization)
+            val bands = org.json.JSONArray()
+            config.bands.forEach { band ->
+                bands.put(
+                    org.json.JSONObject()
+                        .put("index", band.index)
+                        .put("type", band.type.name)
+                        .put("frequency", band.frequency.toDouble())
+                        .put("gainDb", band.gainDb.toDouble())
+                        .put("q", band.q.toDouble())
+                        .put("enabled", band.enabled),
+                )
+            }
+            o.put("bands", bands)
+            o.put(
+                "compressor",
+                org.json.JSONObject()
+                    .put("crossovers", org.json.JSONArray(config.compressor.crossovers))
+                    .put("thresholds", org.json.JSONArray(config.compressor.thresholds))
+                    .put("ratios", org.json.JSONArray(config.compressor.ratios))
+                    .put("attacks", org.json.JSONArray(config.compressor.attacks))
+                    .put("releases", org.json.JSONArray(config.compressor.releases))
+                    .put("knee", config.compressor.knee.toDouble()),
+            )
+            o.put(
+                "limiter",
+                org.json.JSONObject()
+                    .put("ceilingDb", config.limiter.ceilingDb.toDouble())
+                    .put("lookaheadMs", config.limiter.lookaheadMs)
+                    .put("releaseMs", config.limiter.releaseMs)
+                    .put("inputGainDb", config.limiter.inputGainDb.toDouble()),
+            )
+            val effects = org.json.JSONArray()
+            config.effects.forEach { effects.put(it.name) }
+            o.put("effects", effects)
+            prefs.edit().putString(KEY_CONFIG, o.toString()).apply()
+        }
+    }
+
+    private fun floats(array: org.json.JSONArray?, fallback: List<Float>): List<Float> {
+        if (array == null) return fallback
+        return (0 until array.length()).map { array.optDouble(it).toFloat() }
+    }
+
+    private fun ints(array: org.json.JSONArray?, fallback: List<Int>): List<Int> {
+        if (array == null) return fallback
+        return (0 until array.length()).map { array.optInt(it) }
+    }
+
+    private companion object {
+        const val KEY_CONFIG = "config"
     }
 }

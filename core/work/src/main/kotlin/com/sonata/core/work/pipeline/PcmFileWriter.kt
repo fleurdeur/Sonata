@@ -2,6 +2,7 @@ package com.sonata.core.work.pipeline
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.io.File
@@ -11,21 +12,48 @@ import java.nio.ByteOrder
 
 /**
  * Writes PCM to a real audio file. AAC in MP4 is the normal output; if the
- * device encoder misbehaves the same samples are written as WAV, which
- * ExoPlayer plays just as well. The caller never gets a silent failure.
+ * device encoder misbehaves, produced a short file or reports a wrong
+ * duration, the same samples are written as WAV. The caller never gets a
+ * silently truncated track or a .m4a file that is really WAV bytes.
  */
 object PcmFileWriter {
 
     const val BITRATE = 192_000
 
     fun write(pcm: ShortArray, sampleRate: Int, m4a: File): File {
-        if (pcm.isEmpty()) return wav(pcm, sampleRate, File(m4a.parentFile, m4a.nameWithoutExtension + ".wav"))
-        return runCatching { aac(pcm, sampleRate, m4a) }
-            .getOrElse {
-                android.util.Log.w("SonataRender", "AAC encode failed, writing WAV", it)
-                m4a.delete()
-                wav(pcm, sampleRate, File(m4a.parentFile, m4a.nameWithoutExtension + ".wav"))
+        val wavFile = File(m4a.parentFile, m4a.nameWithoutExtension + ".wav")
+        if (pcm.isEmpty()) return wav(pcm, sampleRate, wavFile)
+        val encoded = runCatching { aac(pcm, sampleRate, m4a) }.getOrNull()
+        if (encoded != null && isComplete(encoded, pcm.size, sampleRate)) return encoded
+        encoded?.delete()
+        m4a.delete()
+        android.util.Log.w("SonataRender", "AAC output failed duration verification; writing exact WAV")
+        return wav(pcm, sampleRate, wavFile)
+    }
+
+    /** Container duration check: reject a file that lost more than 250 ms. */
+    private fun isComplete(file: File, samples: Int, sampleRate: Int): Boolean {
+        if (!file.isFile || file.length() < 1_024L) return false
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            var durationUs = 0L
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                if (format.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                    durationUs = runCatching { format.getLong(MediaFormat.KEY_DURATION) }.getOrDefault(0L)
+                    break
+                }
             }
+            if (durationUs <= 0L) return true // no reliable container duration
+            val expectedMs = samples.toLong() * 1_000L / sampleRate
+            val actualMs = durationUs / 1_000L
+            actualMs >= expectedMs - 250L && actualMs <= expectedMs + 3_000L
+        } catch (t: Throwable) {
+            false
+        } finally {
+            extractor.release()
+        }
     }
 
     private fun aac(pcm: ShortArray, sampleRate: Int, outFile: File): File {
@@ -105,7 +133,7 @@ object PcmFileWriter {
     private fun presentationUs(samplePosition: Int, sampleRate: Int): Long =
         samplePosition.toLong() * 1_000_000L / sampleRate
 
-    /** 16-bit mono PCM WAV, the always-available fallback. */
+    /** 16-bit mono PCM WAV, the exact always-available fallback. */
     fun wav(pcm: ShortArray, sampleRate: Int, outFile: File): File {
         outFile.parentFile?.mkdirs()
         val dataSize = pcm.size * 2

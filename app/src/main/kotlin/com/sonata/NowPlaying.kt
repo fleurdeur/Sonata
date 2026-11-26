@@ -174,6 +174,11 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 
+    fun setLyricsOffset(soundId: Long, offsetMs: Long) = viewModelScope.launch {
+        lyricsRepository.setOffset(soundId, offsetMs)
+        _lyrics.value = _lyrics.value?.copy(offsetMs = offsetMs.coerceIn(-2_000L, 2_000L))
+    }
+
     private suspend fun fetch(sound: Sound, refresh: Boolean): Lyrics? = try {
         if (refresh) {
             lyricsRepository.refresh(
@@ -280,6 +285,9 @@ fun NowPlayingScreen(
                         onRefresh = { viewModel.refreshLyrics(sound) },
                         modifier = Modifier.fillMaxSize(),
                         clipOnly = sound?.tags?.contains("clip only") == true,
+                        onOffsetChange = { offset ->
+                            sound?.let { viewModel.setLyricsOffset(it.id, offset) }
+                        },
                     )
                 } else {
                     PlayerPage(
@@ -443,20 +451,6 @@ private fun PlayerPage(
                         ),
                     ),
             )
-            if (sound != null) {
-                Text(
-                    sourceName(sound).uppercase(),
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(16.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    letterSpacing = 1.sp,
-                )
-            }
         }
 
         Spacer(Modifier.height(22.dp))
@@ -481,7 +475,12 @@ private fun PlayerPage(
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     sound.tags
-                        .filter { it in listOf("full song", "clip only", "youtube", "sped up", "slowed", "nightcore", "reverb", "bass boosted") }
+                        .filter {
+                            it in listOf(
+                                "verified", "full song", "clip only", "youtube",
+                                "sped up", "slowed", "nightcore", "reverb", "bass boosted",
+                            ) || it.startsWith("match ")
+                        }
                         .take(3)
                         .forEach { tag -> TrackBadge(tag) }
                 }
@@ -525,12 +524,6 @@ private fun PlayerPage(
                 },
                 active = abStart != null,
                 onClick = onCycleAb,
-            )
-            ActionPill(
-                icon = Icons.Outlined.Lyrics,
-                label = "Lyrics",
-                active = false,
-                onClick = onOpenLyrics,
             )
         }
 
@@ -684,7 +677,7 @@ private fun LyricsTeaser(
 
 @Composable
 private fun TrackBadge(text: String) {
-    val accent = text == "full song" || text == "youtube"
+    val accent = text == "verified" || text == "full song" || text == "youtube"
     Text(
         text,
         Modifier
@@ -745,7 +738,12 @@ private fun ActionPill(
 
 private fun sourceName(sound: Sound?): String {
     if (sound == null) return "SONATA"
+    val match = sound.tags.firstOrNull { it.startsWith("match ") }
+    val suffix = if (match != null) " · " + match.removePrefix("match ") + " match" else ""
     return when {
+        sound.tags.contains("verified") && sound.tags.contains("youtube") ->
+            "YouTube · verified full song" + suffix
+        sound.tags.contains("verified") -> "Verified full song" + suffix
         sound.tags.contains("youtube") -> "YouTube · full song"
         sound.tags.contains("full song") -> "Full song"
         sound.tags.contains("clip only") -> "Original clip"

@@ -133,6 +133,65 @@ object AudioAnalysis {
 
     private fun sinApprox(x: Double): Double = kotlin.math.sin(x)
 
+    /**
+     * Coarse long-term spectral similarity, independent of playhead offset.
+     * This is a second acoustic signal alongside onset correlation: the same
+     * master keeps a similar log-band energy shape even when a clip is only a
+     * few seconds of it. Different songs with similar titles normally do not.
+     */
+    fun spectralSimilarity(a: ShortArray, b: ShortArray, sampleRate: Int = 44_100): Float {
+        val pa = spectralProfile(a, sampleRate)
+        val pb = spectralProfile(b, sampleRate)
+        var dot = 0.0
+        var na = 0.0
+        var nb = 0.0
+        for (i in pa.indices) {
+            dot += pa[i] * pb[i]
+            na += pa[i] * pa[i]
+            nb += pb[i] * pb[i]
+        }
+        if (na <= 1e-12 || nb <= 1e-12) return 0f
+        return (dot / sqrt(na * nb)).toFloat().coerceIn(0f, 1f)
+    }
+
+    private fun spectralProfile(pcm: ShortArray, sampleRate: Int): DoubleArray {
+        val bands = 24
+        val windowSize = 4096
+        val step = (sampleRate / 8_000).coerceAtLeast(1)
+        val effectiveRate = sampleRate / step
+        val usable = kotlin.math.min(pcm.size, sampleRate * 60)
+        if (usable < windowSize * step) return DoubleArray(bands)
+        val windows = 6
+        val maxBase = (usable / step - windowSize).coerceAtLeast(0)
+        val freqs = DoubleArray(bands) { i ->
+            60.0 * Math.pow(3_800.0 / 60.0, i.toDouble() / (bands - 1))
+        }
+        val out = DoubleArray(bands)
+        val twoPi = 2.0 * Math.PI
+        for (w in 0 until windows) {
+            val base = if (windows == 1) 0 else w * maxBase / (windows - 1)
+            for (b in 0 until bands) {
+                val omega = twoPi * freqs[b] / effectiveRate
+                var re = 0.0
+                var im = 0.0
+                for (i in 0 until windowSize) {
+                    val sampleIndex = (base + i) * step
+                    if (sampleIndex >= pcm.size) break
+                    val hann = 0.5 - 0.5 * cos(twoPi * i / windowSize)
+                    val value = pcm[sampleIndex] / 32768.0 * hann
+                    re += value * cos(omega * i)
+                    im -= value * kotlin.math.sin(omega * i)
+                }
+                out[b] += sqrt(re * re + im * im)
+            }
+        }
+        val total = out.sum()
+        if (total > 1e-12) {
+            for (i in out.indices) out[i] /= total
+        }
+        return out
+    }
+
     /** RMS-based integrated loudness, mapped into a LUFS-like scale. */
     fun loudnessLufs(pcm: ShortArray): Float {
         if (pcm.isEmpty()) return -70f

@@ -19,4 +19,11 @@ interface LyricsDao {
 
     @Query("DELETE FROM lyrics WHERE soundId = :soundId")
     suspend fun delete(soundId: Long)
+
+    @Query("UPDATE lyrics SET offsetMs = :offsetMs WHERE soundId = :soundId")
+    suspend fun updateOffset(soundId: Long, offsetMs: Long)
+
+    /** Sound ids with a cached lyric sheet, for library smart filters. */
+    @Query("SELECT soundId FROM lyrics WHERE provider != 'none'")
+    fun observeSoundIdsWithLyrics(): Flow<List<Long>>
 }

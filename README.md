@@ -1,7 +1,7 @@
 # Sonata
 
 An offline-first Android player for short-form sound. Share a TikTok video to
-Sonata and the app turns it into a track: the audio is separated on-device, the
+Sonata and the app turns it into a track: the audio is extracted on-device, the
 real full song is found through TikTok or the BitChord YouTube extractor, and
 the clip's edit is measured and reapplied to that full recording. A clip is
 never looped into a fake full song.
@@ -19,7 +19,10 @@ No account, no ads, no analytics, no uploads. Everything lives on the phone.
 3. It looks for the full sound behind the post. If TikTok exposes a genuinely
    longer music stream it is used. Otherwise Sonata searches YouTube through the
    BitChord InnerTube extractor, rejects covers, live cuts, loops and hour-long
-   edits, and downloads the best full-length match.
+   edits, and downloads the best full-length match. Original sounds use the
+   caption as search text. A match is accepted only when acoustic correlation,
+   metadata and spectrum agree; the matched recording is downloaded in full,
+   never repeated.
 4. On the full recording, the clip's onset envelope is matched at every
    plausible speed (0.75×–1.5×), so a sped-up edit stays sped up instead of
    being slowed down by a half-time tempo reading. Pitch follows only when the
@@ -30,8 +33,9 @@ No account, no ads, no analytics, no uploads. Everything lives on the phone.
    cover, waveform, BPM, key and effect tags.
 
 The import runs in WorkManager (it survives leaving the app), shows its real
-stage and progress in the import sheet, can be cancelled, and retries once with
-backoff before it reports a failure.
+stage and progress in the import sheet, can be cancelled, and retries up to
+three times with backoff. Completed network stages are cached so a retry resumes
+instead of downloading everything again.
 
 ### Import from elsewhere
 
@@ -46,8 +50,11 @@ backoff before it reports a failure.
 
 Recent imports, most played, and sounds that came from TikTok. Multi-select for
 play, favourite, delete or add to playlist; sort by recency, title, plays or BPM;
-playlist creation and editing. Search understands plain text (title, artist, tag)
-and phrases such as "slow 120 bpm under 40 seconds".
+playlist creation and editing. Smart filters narrow the list to full songs,
+clips, tracks with lyrics, tracks with BPM, or short/long tracks. The tag editor
+updates title, artist and tags and re-matches lyrics when the identity changes.
+Search understands plain text (title, artist, tag) and phrases such as
+"slow 120 bpm under 40 seconds".
 
 ### Player
 
@@ -62,38 +69,49 @@ Apple Music-style animated lyrics: the active line grows and brightens while
 neighbours fade, and the page follows the song automatically. Tapping a line
 seeks there. Timed lyrics are requested in parallel from LRCLIB, NetEase, QQ
 Music and lyrics.ovh, cached in Room, and shifted into the finished track's
-timeline when the edit changed its tempo. Plain lyrics are used when no timed
-version exists; the player shows exactly which provider supplied them.
+timeline when the edit changed its tempo. Word-level enhanced LRC animates
+phrase by phrase. Plain lyrics are used when no timed version exists; the player
+shows which provider supplied them and offers a ±2 s timing nudge for lyrics
+that are consistently ahead or behind.
 
 ### Mix
 
 The library is ordered into a harmonic path: each next track is chosen for a
 small tempo step and a compatible Camelot key. "Play the mix" plays that order.
+Every row also has up/down controls, so the queue can be rearranged by hand and
+returned to harmonic order with one tap.
 
 ### Equalizer
 
-DynamicsProcessing on the player session with a draggable response curve, five
-bands (frequency, gain, Q), compressor, limiter, effects and output gain. The
-active engine is shown, and the app falls back to the framework equalizer when
-DynamicsProcessing is unavailable.
+DynamicsProcessing on the player session with a draggable response curve, eight
+peaking bands, four-band compression, a lookahead limiter, output gain, A/B
+bypass and presets stored in Room. The active engine is shown. On devices
+without DynamicsProcessing the app falls back to the framework equalizer for EQ
+and boost-only gain; compression, limiting, Q and filter type are hidden or
+marked unavailable instead of pretending to work.
 
 ### Settings
 
-Theme (light, dark, pure black, system), Material You, six accent colours,
-storage usage and cache clearing, and the equalizer entry point. Only settings
-that change the app are shown.
+Theme (light, dark, pure black, system), Material You, six accent colours, a
+measured storage breakdown, cache clearing, the equalizer, and library backup.
+Backup writes a JSON file with track metadata, tags and lyrics (never audio or
+local paths) through the system file picker; restore matches those records to the
+current library by acoustic fingerprint. Only settings that change the app are
+shown.
 
 ## Build from source
 
-Requirements: JDK 17, Android SDK 36, Gradle 8.13+ (the repository has no wrapper
-checked in).
+Requirements: JDK 17 and Android SDK 36. The Gradle wrapper is committed, so no
+separate Gradle installation is needed.
 
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk
-gradle :app:assembleDebug        # debug APK
-gradle testDebugUnitTest         # JVM tests (DSP, matching, lyrics, ordering)
-gradle :app:assembleRelease      # signed release, needs keystore.properties
+./gradlew :app:assembleDebug        # debug APK
+./gradlew testDebugUnitTest         # JVM tests (DSP, matching, lyrics, ordering)
+./gradlew :app:assembleRelease      # signed release, needs keystore.properties
 ```
+
+On Windows use `gradlew.bat` instead of `./gradlew`.
 
 The release build reads `keystore.properties` from the repository root:
 

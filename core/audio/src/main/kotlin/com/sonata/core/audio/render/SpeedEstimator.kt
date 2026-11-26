@@ -22,6 +22,8 @@ object SpeedEstimator {
         val confidence: Double,
         /** The long sound is the same version the clip uses, not an original. */
         val sameRecording: Boolean,
+        /** Start of the clip inside the time-scaled long sound. */
+        val offsetMs: Long = 0,
     )
 
     private const val ENVELOPE_HZ = 50
@@ -55,15 +57,17 @@ object SpeedEstimator {
 
         var bestSpeed = 1f
         var bestScore = -1.0
+        var bestOffset = 0
         var scoreAtOne = 0.0
         for (speed in candidates) {
             val scaled = stretchEnvelope(fullEnv, speed)
             if (scaled.size < clipEnv.size + 2) continue
-            val score = bestCorrelation(clipEnv, scaled)
-            if (speed == 1f) scoreAtOne = score
-            if (score > bestScore) {
-                bestScore = score
+            val correlation = bestCorrelation(clipEnv, scaled)
+            if (speed == 1f) scoreAtOne = correlation.first
+            if (correlation.first > bestScore) {
+                bestScore = correlation.first
                 bestSpeed = speed
+                bestOffset = correlation.second
             }
         }
         if (bestScore < 0.30) return Estimate(1f, bestScore.coerceAtLeast(0.0), false)
@@ -82,7 +86,12 @@ object SpeedEstimator {
             if (!accepted) speed = 1f
         }
         if (abs(speed - 1f) < 0.02f) speed = 1f
-        return Estimate(speed, bestScore, same && speed == 1f)
+        return Estimate(
+            speed = speed,
+            confidence = bestScore,
+            sameRecording = same && speed == 1f,
+            offsetMs = (bestOffset.toLong() * 1_000L / ENVELOPE_HZ),
+        )
     }
 
     /** Onset strength: positive changes in short-term RMS, which survive pitch shifts. */
@@ -120,10 +129,10 @@ object SpeedEstimator {
         return out
     }
 
-    /** Highest Pearson correlation of [clip] anywhere in [track]. */
-    private fun bestCorrelation(clip: DoubleArray, track: DoubleArray): Double {
+    /** Highest Pearson correlation of [clip] anywhere in [track], plus offset. */
+    private fun bestCorrelation(clip: DoubleArray, track: DoubleArray): Pair<Double, Int> {
         val n = clip.size
-        if (n < 8 || track.size < n) return 0.0
+        if (n < 8 || track.size < n) return 0.0 to 0
         var clipMean = 0.0
         for (v in clip) clipMean += v
         clipMean /= n
@@ -134,7 +143,7 @@ object SpeedEstimator {
             centered[i] = c
             clipVar += c * c
         }
-        if (clipVar <= 1e-12) return 0.0
+        if (clipVar <= 1e-12) return 0.0 to 0
 
         val sum = DoubleArray(track.size + 1)
         val sumSq = DoubleArray(track.size + 1)
@@ -156,10 +165,13 @@ object SpeedEstimator {
         val limit = (bestOffset + coarse).coerceAtMost(track.size - n)
         while (refine <= limit) {
             val score = pearson(centered, clipVar, track, sum, sumSq, refine)
-            if (score > best) best = score
+            if (score > best) {
+                best = score
+                bestOffset = refine
+            }
             refine++
         }
-        return best
+        return best to bestOffset
     }
 
     private fun pearson(

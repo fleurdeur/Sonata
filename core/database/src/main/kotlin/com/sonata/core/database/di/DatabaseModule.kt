@@ -17,8 +17,8 @@ object DatabaseModule {
     @Provides @Singleton
     fun provideDatabase(@ApplicationContext context: Context): SonataDatabase =
         Room.databaseBuilder(context, SonataDatabase::class.java, SonataDatabase.NAME)
-            .addMigrations(SonataDatabase.MIGRATION_1_2)
-            .fallbackToDestructiveMigration(dropAllTables = false)
+            .addMigrations(SonataDatabase.MIGRATION_1_2, SonataDatabase.MIGRATION_2_3)
+            // No destructive fallback: a missing migration must never wipe a library.
             .build()
 
     @Provides fun soundDao(db: SonataDatabase) = db.soundDao()

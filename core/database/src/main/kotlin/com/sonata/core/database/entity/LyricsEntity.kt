@@ -30,4 +30,6 @@ data class LyricsEntity(
     val artistName: String? = null,
     val timeScale: Float = 1f,
     val updatedAt: Long = 0,
+    /** User calibration in milliseconds; positive means lyrics appear later. */
+    val offsetMs: Long = 0,
 )

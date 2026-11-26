@@ -32,9 +32,13 @@ class LrcParserTest {
     }
 
     @Test
-    fun stripsEnhancedWordTiming() {
+    fun keepsEnhancedWordTiming() {
         val lines = LrcParser.parse("[00:02.00]<00:02.00>Hello <00:02.50>there")
-        assertEquals("Hello there", lines.single().text)
+        val line = lines.single()
+        assertEquals("Hello there", line.text)
+        assertEquals(2, line.words.size)
+        assertEquals(2_000L, line.words[0].timeMs)
+        assertEquals(2_500L, line.words[1].timeMs)
     }
 
     @Test

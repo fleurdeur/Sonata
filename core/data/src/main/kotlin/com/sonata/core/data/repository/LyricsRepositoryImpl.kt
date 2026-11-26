@@ -68,6 +68,38 @@ class LyricsRepositoryImpl @Inject constructor(
         fetchAndStore(soundId, title, artist, durationMs, speed)
     }
 
+    override suspend fun setOffset(soundId: Long, offsetMs: Long) =
+        withContext(Dispatchers.IO) {
+            dao.updateOffset(soundId, offsetMs.coerceIn(-2_000L, 2_000L))
+        }
+
+    override fun observeSoundIdsWithLyrics(): Flow<Set<Long>> =
+        dao.observeSoundIdsWithLyrics().map { it.toSet() }
+
+    override suspend fun save(soundId: Long, lyrics: Lyrics) = withContext(Dispatchers.IO) {
+        val lrc = lyrics.rawLrc ?: lyrics.lines.takeIf { it.isNotEmpty() }?.joinToString("\n") { line ->            val total = (line.timeMs + 59_999L).coerceAtLeast(0L)
+            val minutes = total / 60_000L
+            val seconds = (total % 60_000L) / 1000L
+            val hundredths = (total % 1000L) / 10L
+            "[" + minutes.toString().padStart(2, '0') + ":" +
+                seconds.toString().padStart(2, '0') + "." +
+                hundredths.toString().padStart(2, '0') + "]" + line.text
+        }
+        dao.upsert(
+            LyricsEntity(
+                soundId = soundId,
+                provider = lyrics.provider.ifBlank { "Backup" },
+                syncedLrc = lrc,
+                plainText = lyrics.plainText.ifBlank { lrc?.let(LrcParser::plainFromLrc).orEmpty() },
+                trackName = lyrics.trackName,
+                artistName = lyrics.artistName,
+                timeScale = lyrics.speed.coerceIn(0.2f, 5f),
+                updatedAt = System.currentTimeMillis(),
+                offsetMs = lyrics.offsetMs.coerceIn(-2_000L, 2_000L),
+            ),
+        )
+    }
+
     private suspend fun fetchAndStore(
         soundId: Long,
         title: String,
@@ -111,12 +143,14 @@ class LyricsRepositoryImpl @Inject constructor(
             )
         }.maxByOrNull { it.score }
 
+        val previousOffset = dao.get(soundId)?.offsetMs ?: 0L
         val entity = if (best == null) {
             LyricsEntity(
                 soundId = soundId,
                 provider = NONE,
                 timeScale = rate,
                 updatedAt = System.currentTimeMillis(),
+                offsetMs = previousOffset,
             )
         } else {
             LyricsEntity(
@@ -128,6 +162,7 @@ class LyricsRepositoryImpl @Inject constructor(
                 artistName = best.provider.artistName,
                 timeScale = rate,
                 updatedAt = System.currentTimeMillis(),
+                offsetMs = previousOffset,
             )
         }
         runCatching { dao.upsert(entity) }
@@ -156,6 +191,8 @@ class LyricsRepositoryImpl @Inject constructor(
             trackName = trackName,
             artistName = artistName,
             speed = timeScale,
+            offsetMs = offsetMs,
+            rawLrc = syncedLrc,
         )
     }
 

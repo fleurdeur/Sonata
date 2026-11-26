@@ -56,6 +56,9 @@ interface ImportJobDao {
     @Query("SELECT * FROM import_jobs ORDER BY rowid")
     fun observeQueue(): Flow<List<ImportJobEntity>>
 
+    @Query("SELECT * FROM import_jobs WHERE id = :id")
+    suspend fun get(id: String): ImportJobEntity?
+
     @Upsert
     suspend fun upsert(job: ImportJobEntity)
 

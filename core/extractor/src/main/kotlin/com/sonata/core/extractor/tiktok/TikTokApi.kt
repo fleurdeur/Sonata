@@ -53,10 +53,15 @@ data class TikTokVideo(
     /** Query used to look for a longer version of the same song. */
     val fullTrackQuery: String?
         get() {
-            if (isOriginalSound) return null
-            val title = cleanSoundTitle(musicTitle.orEmpty())
-            if (title.isBlank() || title.equals("original sound", true)) return null
-            return listOfNotNull(title, musicAuthor?.takeIf { it.isNotBlank() }).joinToString(" ")
+            val music = cleanSoundTitle(musicTitle.orEmpty())
+            val title = music.takeIf { it.isNotBlank() && !it.equals("original sound", true) }
+                ?: description.lineSequence().firstOrNull()
+                    ?.trim()
+                    ?.takeIf { it.length >= 3 }
+                ?: return null
+            val artist = musicAuthor?.trim()
+                ?.takeIf { it.isNotBlank() && !it.equals("TikTok", true) && !it.equals("original sound", true) }
+            return listOfNotNull(title, artist).joinToString(" ")
         }
 
     private fun cleanSoundTitle(raw: String): String {
@@ -315,7 +320,12 @@ class TikTokApi @Inject constructor() {
     }
 }
 
-/** Streams a remote media file to disk with progress, redirects and timeouts. */
+/**
+ * Streams remote media to disk atomically. Bytes go to a .part file, the
+ * declared content length is verified, and only a complete response is
+ * renamed onto [destination]. A killed import can therefore never leave a
+ * half-written file that later looks like a valid cache hit.
+ */
 class MediaDownloader @Inject constructor() {
 
     suspend fun download(
@@ -326,44 +336,60 @@ class MediaDownloader @Inject constructor() {
         onProgress: suspend (Float) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
+        val part = File(destination.parentFile, destination.name + ".part")
+        part.delete()
         var current = url
         var redirects = 0
-        while (redirects < 5) {
-            val connection = URL(current).openConnection() as HttpURLConnection
-            connection.instanceFollowRedirects = false
-            connection.connectTimeout = 20_000
-            connection.readTimeout = 60_000
-            connection.setRequestProperty("User-Agent", userAgent)
-            connection.setRequestProperty("Referer", referer)
-            connection.setRequestProperty("Accept", "*/*")
-            try {
-                val code = connection.responseCode
-                if (code in 300..399) {
-                    current = connection.getHeaderField("Location") ?: error("Redirect without location")
-                    redirects++
-                    continue
-                }
-                if (code !in 200..299) error("Download failed: HTTP $code")
-                val total = connection.contentLengthLong
-                var written = 0L
-                connection.inputStream.use { input ->
-                    destination.outputStream().use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            output.write(buffer, 0, read)
-                            written += read
-                            if (total > 0) onProgress((written.toFloat() / total).coerceIn(0f, 1f))
+        try {
+            while (redirects < 5) {
+                val connection = URL(current).openConnection() as HttpURLConnection
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = 20_000
+                connection.readTimeout = 60_000
+                connection.setRequestProperty("User-Agent", userAgent)
+                connection.setRequestProperty("Referer", referer)
+                connection.setRequestProperty("Accept", "*/*")
+                try {
+                    val code = connection.responseCode
+                    if (code in 300..399) {
+                        current = connection.getHeaderField("Location")
+                            ?: error("Download redirect without a location")
+                        redirects++
+                        continue
+                    }
+                    if (code !in 200..299) error("Download failed: HTTP $code")
+                    val total = connection.contentLengthLong
+                    var written = 0L
+                    connection.inputStream.use { input ->
+                        part.outputStream().use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
+                                written += read
+                                if (total > 0) {
+                                    onProgress((written.toFloat() / total).coerceIn(0f, 1f))
+                                }
+                            }
+                            output.flush()
                         }
                     }
+                    if (written <= 0L) error("Downloaded an empty file")
+                    if (total > 0 && written != total) {
+                        error("Incomplete download: $written of $total bytes")
+                    }
+                    if (!part.renameTo(destination)) {
+                        part.copyTo(destination, overwrite = true)
+                    }
+                    return@withContext destination
+                } finally {
+                    connection.disconnect()
                 }
-                if (written == 0L) error("Downloaded an empty file")
-                return@withContext destination
-            } finally {
-                connection.disconnect()
             }
+            error("Too many redirects")
+        } finally {
+            part.delete()
         }
-        error("Too many redirects")
     }
 }
