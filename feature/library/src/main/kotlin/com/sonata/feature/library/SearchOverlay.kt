@@ -26,8 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -44,6 +42,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -107,7 +106,10 @@ fun SearchOverlay(
     val spacing = LocalSpacing.current
     val focus = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    LaunchedEffect(Unit) {
+        delay(220)
+        runCatching { focus.requestFocus() }
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = spacing.mdDp)) {
         Row(
@@ -126,8 +128,7 @@ fun SearchOverlay(
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 modifier = Modifier
                     .weight(1f)
-                    .focusRequester(focus)
-                    .semantics { contentDescription = "Search field" },
+                    .focusRequester(focus),
                 singleLine = true,
             )
         }
@@ -158,6 +159,7 @@ fun SearchOverlay(
         }
 
         LazyColumn(
+            modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -35,8 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -162,6 +162,7 @@ fun LibraryScreen(
     var sort by remember { mutableStateOf(LibrarySort.RECENT) }
     var sortMenu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
+    var confirmDelete by remember { mutableStateOf<Set<Long>?>(null) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
     var playlistPickerFor by remember { mutableStateOf<List<Long>?>(null) }
@@ -201,6 +202,7 @@ fun LibraryScreen(
                 )
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
@@ -247,10 +249,42 @@ fun LibraryScreen(
             }
         }
 
-        TabRow(selectedTabIndex = tab) {
-            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Sounds") })
-            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Playlists") })
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.7f),
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        ) {
+            Row(Modifier.padding(4.dp)) {
+                listOf("Sounds", "Playlists").forEachIndexed { index, label ->
+                    val selected = tab == index
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(CircleShape)
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.primary
+                                else androidx.compose.ui.graphics.Color.Transparent,
+                            )
+                            .clickable { tab = index }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
+            }
         }
+
+        val selectedSounds = sorted.filter { it.id in selection }
+        val allFavorite = selectedSounds.isNotEmpty() && selectedSounds.all { it.isFavorite }
 
         if (selection.isNotEmpty()) {
             Row(
@@ -263,17 +297,21 @@ fun LibraryScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = {
-                    viewModel.play(sorted.filter { it.id in selection })
+                    viewModel.play(selectedSounds)
                 }) { Icon(Icons.Filled.PlayArrow, contentDescription = "Play selected") }
                 IconButton(onClick = {
-                    viewModel.favoriteAll(sorted.filter { it.id in selection }, favorite = true)
-                }) { Icon(Icons.Filled.Favorite, contentDescription = "Favorite selected") }
+                    viewModel.favoriteAll(selectedSounds, favorite = !allFavorite)
+                }) {
+                    Icon(
+                        if (allFavorite) Icons.Filled.FavoriteBorder else Icons.Filled.Favorite,
+                        contentDescription = if (allFavorite) "Remove selected from favorites" else "Favorite selected",
+                    )
+                }
                 IconButton(onClick = { playlistPickerFor = selection.toList() }) {
                     Icon(Icons.Outlined.PlaylistAdd, contentDescription = "Add selected to playlist")
                 }
                 IconButton(onClick = {
-                    viewModel.delete(selection.toList())
-                    selection = emptySet()
+                    confirmDelete = selection
                 }) { Icon(Icons.Filled.Delete, contentDescription = "Delete selected") }
                 TextButton(onClick = { selection = emptySet() }) { Text("Done") }
             }
@@ -287,6 +325,7 @@ fun LibraryScreen(
                 )
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
@@ -321,6 +360,7 @@ fun LibraryScreen(
             }
 
             else -> LazyColumn(
+                modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(top = spacing.smDp, bottom = Dimensions.listBottomPadding),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -426,6 +466,27 @@ fun LibraryScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNewPlaylist = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    val deleting = confirmDelete
+    if (deleting != null) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text(if (deleting.size == 1) "Delete this sound?" else "Delete " + deleting.size + " sounds?") },
+            text = { Text("The audio files will be removed from this device. This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.delete(deleting.toList())
+                        selection = emptySet()
+                        confirmDelete = null
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = null }) { Text("Cancel") }
             },
         )
     }

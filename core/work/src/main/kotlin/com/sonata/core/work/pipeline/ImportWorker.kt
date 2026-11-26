@@ -14,6 +14,7 @@ import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.domain.model.MusicalKey
 import com.sonata.core.domain.repository.ImportRepository
+import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.extractor.provider.LinkResolverRegistry
 import com.sonata.core.extractor.tiktok.MediaDownloader
 import com.sonata.core.extractor.tiktok.TikTokUrls
@@ -46,6 +47,7 @@ class ImportWorker @AssistedInject constructor(
     private val audioStore: AudioStore,
     private val downloader: MediaDownloader,
     private val tiktokPipeline: TikTokPipeline,
+    private val lyricsRepository: LyricsRepository,
     @IoDispatcher private val io: CoroutineDispatcher,
 ) : CoroutineWorker(appContext, params) {
 
@@ -101,7 +103,7 @@ class ImportWorker @AssistedInject constructor(
             if (title.isNotBlank()) lastTitle = title
             progress(stage, fraction, title, null)
         }
-        progress(ImportStage.ANALYZING, 0.95f, track.title, null)
+        progress(ImportStage.ANALYZING, 0.92f, track.title, null)
         val file = audioStore.newSoundFile("m4a")
         val written = PcmFileWriter.write(track.pcm, PcmTools.SAMPLE_RATE, file)
         return persist(
@@ -113,6 +115,8 @@ class ImportWorker @AssistedInject constructor(
             coverPath = track.coverPath,
             tags = track.tags,
             progress = progress,
+            speed = track.effect.speed,
+            fetchLyrics = track.fromFullSong,
         )
     }
 
@@ -189,7 +193,7 @@ class ImportWorker @AssistedInject constructor(
         progress(ImportStage.RENDERING, 0.85f, "Writing track", null)
         val file = audioStore.newSoundFile("m4a")
         val written = PcmFileWriter.write(pcm, PcmTools.SAMPLE_RATE, file)
-        return persist(pcm, written, title, artist, source, coverPath, tags, progress)
+        return persist(pcm, written, title, artist, source, coverPath, tags, progress, 1f)
     }
 
     private suspend fun decode(
@@ -210,8 +214,10 @@ class ImportWorker @AssistedInject constructor(
         coverPath: String?,
         tags: List<String>,
         progress: suspend (ImportStage, Float, String, String?) -> Unit,
+        speed: Float = 1f,
+        fetchLyrics: Boolean = true,
     ): Stored {
-        progress(ImportStage.ANALYZING, 0.9f, title, null)
+        progress(ImportStage.ANALYZING, 0.93f, title, null)
         val fingerprint = AudioAnalysis.fingerprint(pcm, PcmTools.SAMPLE_RATE)
         val existing = soundDao.findByFingerprint(fingerprint)
         if (existing != null) {
@@ -241,7 +247,14 @@ class ImportWorker @AssistedInject constructor(
         )
         val (silenceStart, silenceEnd) = AudioAnalysis.detectSilence(pcm, PcmTools.SAMPLE_RATE)
         File(applicationContext.filesDir, "trim_suggestions").apply { mkdirs() }
-            .resolve("$id.json").writeText("{\"start\":$silenceStart,\"end\":$silenceEnd}")
+            .resolve(id.toString() + ".json")
+            .writeText("{\"start\":" + silenceStart + ",\"end\":" + silenceEnd + "}")
+        if (fetchLyrics && durationMs >= 30_000) {
+            progress(ImportStage.ANALYZING, 0.97f, "Downloading lyrics", null)
+            runCatching {
+                lyricsRepository.getOrFetch(id, title, artist, durationMs, speed)
+            }
+        }
         return Stored(id, title, duplicate = false, trimStart = silenceStart, trimEnd = silenceEnd)
     }
 

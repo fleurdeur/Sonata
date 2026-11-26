@@ -89,7 +89,7 @@ fun MixScreen(viewModel: MixViewModel = hiltViewModel()) {
             Column(Modifier.fillMaxWidth()) {
                 Button(
                     onClick = { viewModel.play(order) },
-                    enabled = order.isNotEmpty(),
+                    enabled = sounds.size >= 2,
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 48.dp),

@@ -27,7 +27,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -113,8 +112,8 @@ class SettingsViewModel @Inject constructor(
 
 /**
  * Settings contains only switches that change something you can observe:
- * the theme, the accent, the glass blur, the equalizer, the import cache and
- * the first-run tour. Everything else was removed rather than left as a label.
+ * the theme, the accent, the equalizer, the import cache and the first-run
+ * tour. Everything else was removed rather than left as a label.
  */
 @Composable
 fun SettingsScreen(
@@ -207,22 +206,6 @@ fun SettingsScreen(
                 }
             }
         }
-        item {
-            Column(Modifier.padding(top = spacing.mdDp)) {
-                Text("Glass blur", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "${settings.blurStrength} dp behind the player and the bars",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Slider(
-                    value = settings.blurStrength.toFloat(),
-                    onValueChange = { value -> viewModel.update { it.copy(blurStrength = value.toInt()) } },
-                    valueRange = 0f..32f,
-                    steps = 7,
-                )
-            }
-        }
 
         item { SectionTitle("Audio") }
         item {
@@ -238,7 +221,7 @@ fun SettingsScreen(
             SettingsRow(
                 title = "Sounds on this device",
                 subtitle = "${sounds.size} files",
-                onClick = {},
+                onClick = null,
                 showChevron = false,
             )
         }
@@ -319,14 +302,14 @@ private fun SettingToggle(
 private fun SettingsRow(
     title: String,
     subtitle: String,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)?,
     showChevron: Boolean = true,
 ) {
     Row(
         Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
-            .clickable(onClick = onClick)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -352,4 +335,4 @@ private fun versionName(context: Context): String = runCatching {
     val info = context.packageManager.getPackageInfo(context.packageName, 0)
     val code = if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
     "${info.versionName} ($code)"
-}.getOrDefault("1.1.0")
+}.getOrDefault("unknown")

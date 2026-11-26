@@ -1,6 +1,7 @@
 package com.sonata
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,7 +13,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandMore
@@ -42,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -148,21 +149,9 @@ fun SonataApp(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .navigationBarsPadding()
-                        .padding(horizontal = Dimensions.bottomBarInset, vertical = Dimensions.bottomBarInset),
+                        .padding(horizontal = Dimensions.bottomBarInset)
+                        .padding(top = Dimensions.bottomBarInset, bottom = 8.dp),
                 ) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        FloatingActionButton(
-                            onClick = { showImport = true },
-                            modifier = Modifier
-                                .size(Dimensions.importButton)
-                                .semantics { contentDescription = "Import a sound" },
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
-                            shape = RoundedCornerShape(radius.md.dp),
-                        ) {
-                            Icon(Icons.Filled.Add, contentDescription = null)
-                        }
-                    }
                     MiniPlayerBar(
                         player = appViewModel.player,
                         onOpenNowPlaying = { navController.navigate("nowPlaying") { launchSingleTop = true } },
@@ -170,10 +159,10 @@ fun SonataApp(
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(top = Dimensions.miniPlayerGap),
-                        shape = RoundedCornerShape(radius.lg.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainer,
-                        shadowElevation = 6.dp,
+                            .padding(top = 10.dp),
+                        shape = RoundedCornerShape(28.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+                        shadowElevation = 10.dp,
                     ) {
                         NavigationBar(
                             containerColor = androidx.compose.ui.graphics.Color.Transparent,
@@ -200,12 +189,37 @@ fun SonataApp(
                                     },
                                     label = { Text(tab.label) },
                                     colors = NavigationBarItemDefaults.colors(
-                                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                        selectedIconColor = MaterialTheme.colorScheme.primary,
                                         selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                     ),
                                 )
                             }
+                            NavigationBarItem(
+                                selected = false,
+                                onClick = { showImport = true },
+                                icon = {
+                                    Box(
+                                        Modifier
+                                            .size(34.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(MaterialTheme.colorScheme.primary),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Add,
+                                            contentDescription = "Import a sound",
+                                            tint = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                    }
+                                },
+                                label = { Text("Import") },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                                ),
+                            )
                         }
                     }
                 }

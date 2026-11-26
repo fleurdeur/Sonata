@@ -2,8 +2,9 @@
 
 An offline-first Android player for short-form sound. Share a TikTok video to
 Sonata and the app turns it into a track: the audio is separated on-device, the
-full song is fetched when TikTok exposes it, and the clip is rebuilt into a
-complete, loopable song with the original edit's character.
+real full song is found through TikTok or the BitChord YouTube extractor, and
+the clip's edit is measured and reapplied to that full recording. A clip is
+never looped into a fake full song.
 
 No account, no ads, no analytics, no uploads. Everything lives on the phone.
 
@@ -15,15 +16,18 @@ No account, no ads, no analytics, no uploads. Everything lives on the phone.
 2. Sonata reads the post through TikTok's public mobile endpoint (no login, no
    signatures), saves the video to its cache and extracts the audio track with
    MediaCodec.
-3. It looks for the full sound behind the post. When the sound is longer than
-   the clip it is downloaded; otherwise the clip is looped to a complete
-   2-minute song with equal-power crossfades at every join.
-4. On the full sound, the clip's onset envelope is matched at every plausible
-   speed (0.75×–1.5×), so a sped-up edit stays sped up instead of being slowed
-   down by a half-time tempo reading. Pitch follows only when the key shift
-   agrees with the detected speed; if no match is convincing the song keeps its
-   own tempo. The result is peak-normalised, written as AAC and added to the
-   library with cover, waveform, BPM, key and effect tags.
+3. It looks for the full sound behind the post. If TikTok exposes a genuinely
+   longer music stream it is used. Otherwise Sonata searches YouTube through the
+   BitChord InnerTube extractor, rejects covers, live cuts, loops and hour-long
+   edits, and downloads the best full-length match.
+4. On the full recording, the clip's onset envelope is matched at every
+   plausible speed (0.75×–1.5×), so a sped-up edit stays sped up instead of
+   being slowed down by a half-time tempo reading. Pitch follows only when the
+   key shift agrees with the detected speed; reverb and bass are added only when
+   the clip's tail and tags show them. If no full song is available, the actual
+   clip is kept and tagged "clip only" — it is never looped.
+5. The result is peak-normalised, written as AAC and added to the library with
+   cover, waveform, BPM, key and effect tags.
 
 The import runs in WorkManager (it survives leaving the app), shows its real
 stage and progress in the import sheet, can be cancelled, and retries once with
@@ -47,9 +51,19 @@ and phrases such as "slow 120 bpm under 40 seconds".
 
 ### Player
 
-Full player with artwork, waveform seek, play/pause, next/previous, repeat,
-playback speed, A-B loop and a sleep timer. A mini player sits above the
-navigation bar and opens the full player with a tap or an upward swipe.
+Full player with large artwork, a tinted backdrop, waveform seek, play/pause,
+next/previous, repeat, playback speed, A-B loop and a sleep timer. A floating
+mini player sits above a rounded navigation dock and opens the player with a tap
+or an upward swipe.
+
+### Lyrics
+
+Apple Music-style animated lyrics: the active line grows and brightens while
+neighbours fade, and the page follows the song automatically. Tapping a line
+seeks there. Timed lyrics are requested in parallel from LRCLIB, NetEase, QQ
+Music and lyrics.ovh, cached in Room, and shifted into the finished track's
+timeline when the edit changed its tempo. Plain lyrics are used when no timed
+version exists; the player shows exactly which provider supplied them.
 
 ### Mix
 
@@ -65,9 +79,9 @@ DynamicsProcessing is unavailable.
 
 ### Settings
 
-Theme (light, dark, pure black, system), Material You, six accent colours, glass
-blur strength, storage usage and cache clearing, and the equalizer entry point.
-Only settings that change the app are shown.
+Theme (light, dark, pure black, system), Material You, six accent colours,
+storage usage and cache clearing, and the equalizer entry point. Only settings
+that change the app are shown.
 
 ## Build from source
 
@@ -77,7 +91,7 @@ checked in).
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk
 gradle :app:assembleDebug        # debug APK
-gradle testDebugUnitTest         # JVM tests (PCM/DSP, parsing, ordering)
+gradle testDebugUnitTest         # JVM tests (DSP, matching, lyrics, ordering)
 gradle :app:assembleRelease      # signed release, needs keystore.properties
 ```
 
@@ -102,7 +116,8 @@ library, mix, import, editor, settings, stems). Audio transforms live in
 
 ## Privacy
 
-- No network calls except the link you explicitly import.
+- Network calls only for the link you explicitly import, the YouTube full-song
+  lookup and the lyrics providers.
 - No account, no telemetry, no crash reporting.
 - Imported audio, covers and the library database stay in app storage.
 - The Android share sheet sends Sonata the link or file you picked; nothing else.

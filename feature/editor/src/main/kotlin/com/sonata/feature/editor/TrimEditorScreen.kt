@@ -90,12 +90,16 @@ fun TrimEditorScreen(
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent()
-                            if (event.changes.any { it.pressed }) {
-                                val x = event.changes.first().position.x
+                            val pressed = event.changes.filter { it.pressed }
+                            // One finger scrubs; two fingers zoom without moving the cut.
+                            if (pressed.size == 1) {
+                                val x = pressed.first().position.x
                                 val ms = (x / canvasWidth * durationMs).toLong()
-                                    .coerceIn(0, durationMs)
-                                selectionStart = ms
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    .coerceIn(0, selectionEnd)
+                                if (ms != selectionStart) {
+                                    selectionStart = ms
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
                             }
                         }
                     }
@@ -173,7 +177,7 @@ fun TrimEditorScreen(
             horizontalArrangement = Arrangement.spacedBy(spacing.smDp),
         ) {
             OutlinedButton(onClick = { selectionStart = (selectionStart - 10).coerceAtLeast(0) }) { Text("−10 ms") }
-            OutlinedButton(onClick = { selectionStart = (selectionStart + 10).coerceAtMost(durationMs) }) { Text("+10 ms") }
+            OutlinedButton(onClick = { selectionStart = (selectionStart + 10).coerceAtMost(selectionEnd) }) { Text("+10 ms") }
             OutlinedButton(onClick = { selectionStart = 0; selectionEnd = durationMs }) { Text("Reset") }
         }
     }

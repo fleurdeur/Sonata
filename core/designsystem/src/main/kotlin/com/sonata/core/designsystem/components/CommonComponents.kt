@@ -15,11 +15,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -158,8 +161,16 @@ fun SoundRow(
         if (trailing != null) {
             trailing()
         } else {
-            IconButton(onClick = onPlay) {
-                Icon(Icons.Outlined.GraphicEq, contentDescription = "Play ${sound.title}")
+            FilledTonalIconButton(
+                onClick = onPlay,
+                shape = CircleShape,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = "Play ${sound.title}",
+                    modifier = Modifier.size(20.dp),
+                )
             }
         }
     }

@@ -321,6 +321,8 @@ class MediaDownloader @Inject constructor() {
     suspend fun download(
         url: String,
         destination: File,
+        userAgent: String = "Mozilla/5.0 (Linux; Android 13; Pixel 7)",
+        referer: String = "https://www.tiktok.com/",
         onProgress: suspend (Float) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
         destination.parentFile?.mkdirs()
@@ -331,8 +333,9 @@ class MediaDownloader @Inject constructor() {
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 20_000
             connection.readTimeout = 60_000
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7)")
-            connection.setRequestProperty("Referer", "https://www.tiktok.com/")
+            connection.setRequestProperty("User-Agent", userAgent)
+            connection.setRequestProperty("Referer", referer)
+            connection.setRequestProperty("Accept", "*/*")
             try {
                 val code = connection.responseCode
                 if (code in 300..399) {

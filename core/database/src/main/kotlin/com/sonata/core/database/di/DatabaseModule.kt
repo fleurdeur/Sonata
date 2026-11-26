@@ -17,6 +17,7 @@ object DatabaseModule {
     @Provides @Singleton
     fun provideDatabase(@ApplicationContext context: Context): SonataDatabase =
         Room.databaseBuilder(context, SonataDatabase::class.java, SonataDatabase.NAME)
+            .addMigrations(SonataDatabase.MIGRATION_1_2)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
 
@@ -25,4 +26,5 @@ object DatabaseModule {
     @Provides fun mixDao(db: SonataDatabase) = db.mixDao()
     @Provides fun presetDao(db: SonataDatabase) = db.presetDao()
     @Provides fun importJobDao(db: SonataDatabase) = db.importJobDao()
+    @Provides fun lyricsDao(db: SonataDatabase) = db.lyricsDao()
 }

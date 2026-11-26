@@ -29,7 +29,11 @@ class BitchordExtractor @Inject constructor() {
             val response = http.post(
                 InnerTube.SEARCH_ENDPOINT,
                 client,
-                InnerTube.body(client, params = if (music) SEARCH_PARAM_MUSIC else SEARCH_PARAM_VIDEOS),
+                InnerTube.body(
+                    client,
+                    params = if (music) SEARCH_PARAM_MUSIC else SEARCH_PARAM_VIDEOS,
+                    query = query,
+                ),
             )
             parseSearch(response, client.clientName)
         }
@@ -55,6 +59,8 @@ class BitchordExtractor @Inject constructor() {
     /** Resolve a playable stream, walking the full client fallback chain. */
     suspend fun resolveStream(videoId: String): ResolveOutcome = withContext(Dispatchers.IO) {
         var outcome: ResolveOutcome = ResolveOutcome.Unavailable(videoId, "No playable stream from any client")
+        var restricted = false
+        var regionBlocked = false
         for (client in InnerTube.fallbackOrder) {
             val response = runCatching {
                 http.post(InnerTube.PLAYER_ENDPOINT, client, InnerTube.body(client, videoId))
@@ -68,11 +74,14 @@ class BitchordExtractor @Inject constructor() {
                 (it as? kotlinx.serialization.json.JsonPrimitive)?.content
             }
             if (playability == "LOGIN_REQUIRED") {
-                return@withContext ResolveOutcome.AgeRestricted(videoId)
+                // One client asking for a login does not mean the track is
+                // age-restricted; another client often still returns a URL.
+                restricted = true
+                continue
             }
             if (playability == "UNPLAYABLE") {
                 if (reason?.contains("country", ignoreCase = true) == true) {
-                    return@withContext ResolveOutcome.RegionBlocked(videoId)
+                    regionBlocked = true
                 }
                 outcome = ResolveOutcome.Unavailable(videoId, reason ?: "Unplayable")
                 continue
@@ -83,7 +92,11 @@ class BitchordExtractor @Inject constructor() {
                 return@withContext ResolveOutcome.Ok(stream.url, stream.bitrate, client)
             }
         }
-        outcome
+        when {
+            restricted -> ResolveOutcome.AgeRestricted(videoId)
+            regionBlocked -> ResolveOutcome.RegionBlocked(videoId)
+            else -> outcome
+        }
     }
 
     /** Radio / autoplay: up-next songs for a video via the `next` endpoint. */
@@ -108,8 +121,14 @@ class BitchordExtractor @Inject constructor() {
 
     // -------------------------------------------------------------- parsing
 
-    private fun parseSearch(response: kotlinx.serialization.json.JsonElement, clientName: String): List<SearchResult> =
-        response.deepFind("videoRenderer")
+    internal fun parseSearch(
+        response: kotlinx.serialization.json.JsonElement,
+        clientName: String,
+    ): List<SearchResult> =
+        // The Android search client returns compactVideoRenderer instead of the
+        // web client's videoRenderer. Accept every shape YouTube uses.
+        listOf("videoRenderer", "compactVideoRenderer", "videoWithContextRenderer")
+            .flatMap { field -> response.deepFind(field) }
             .mapNotNull { el ->
                 (el as? kotlinx.serialization.json.JsonObject)?.let { parseRenderer(it, clientName) }
             }
@@ -199,16 +218,22 @@ class BitchordHttp {
         connection.requestMethod = "POST"
         connection.setRequestProperty("Content-Type", "application/json")
         connection.setRequestProperty("User-Agent", client.userAgent)
-        connection.setRequestProperty("X-YouTube-Client-Name", client.clientName)
+        connection.setRequestProperty("X-YouTube-Client-Name", client.clientId)
         connection.setRequestProperty("X-YouTube-Client-Version", client.clientVersion)
+        connection.setRequestProperty("X-Goog-Api-Key", client.apiKey)
+        connection.setRequestProperty("Origin", "https://www.youtube.com")
         connection.connectTimeout = 10_000
         connection.readTimeout = 15_000
         connection.doOutput = true
         connection.outputStream.use { it.write(body.toString().toByteArray()) }
-        val code = connection.responseCode
-        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code !in 200..299) throw IllegalStateException("InnerTube $code: ${text.take(200)}")
-        return InnerTube.json.parseToJsonElement(text)
+        try {
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            if (code !in 200..299) throw IllegalStateException("InnerTube " + code + ": " + text.take(200))
+            return InnerTube.json.parseToJsonElement(text)
+        } finally {
+            connection.disconnect()
+        }
     }
 }

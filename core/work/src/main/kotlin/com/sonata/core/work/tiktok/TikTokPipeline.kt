@@ -1,10 +1,15 @@
 package com.sonata.core.work.tiktok
 
+import android.content.Context
 import com.sonata.core.audio.render.EffectSpec
 import com.sonata.core.audio.render.PcmTools
 import com.sonata.core.audio.render.SpeedEstimator
 import com.sonata.core.audio.render.TrackRenderer
 import com.sonata.core.domain.model.ImportStage
+import com.sonata.core.extractor.bitchord.BitchordExtractor
+import com.sonata.core.extractor.bitchord.FullTrackCandidate
+import com.sonata.core.extractor.bitchord.FullTrackFinder
+import com.sonata.core.extractor.bitchord.ResolveOutcome
 import com.sonata.core.extractor.tiktok.MediaDownloader
 import com.sonata.core.extractor.tiktok.TikTokApi
 import com.sonata.core.extractor.tiktok.TikTokVideo
@@ -16,7 +21,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.log2
-import android.content.Context
+import kotlin.math.roundToInt
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
 /** A finished TikTok import, ready to be inserted into the library. */
 data class TikTokTrack(
@@ -35,11 +42,15 @@ data class TikTokTrack(
  *
  * 1. read the post's metadata (title, artist, music, media URLs),
  * 2. download the video and decode its audio,
- * 3. fetch the full-length sound when TikTok exposes it,
+ * 3. obtain the **full-length** song: TikTok's own music stream when it is
+ *    genuinely longer than the clip, otherwise the original recording from
+ *    YouTube / YouTube Music,
  * 4. measure the clip against the full song to recover the edit's speed,
  *    pitch coupling, reverb and bass character,
- * 5. render the final audio, looping a short clip into a full track when the
- *    sound only exists as part of the video.
+ * 5. apply exactly those effects to the full song.
+ *
+ * A short clip is never looped into a fake full song. If no full version can
+ * be found the real clip is kept as-is and tagged honestly.
  */
 @Singleton
 class TikTokPipeline @Inject constructor(
@@ -47,6 +58,8 @@ class TikTokPipeline @Inject constructor(
     private val api: TikTokApi,
     private val downloader: MediaDownloader,
     private val audioStore: AudioStore,
+    private val fullTrackFinder: FullTrackFinder,
+    private val extractor: BitchordExtractor,
 ) {
 
     suspend fun process(
@@ -58,113 +71,188 @@ class TikTokPipeline @Inject constructor(
             onStage(ImportStage.RESOLVING, 0.04f + fraction * 0.12f, label)
         }
 
-        val clipFile = audioStore.cacheFile("tiktok_${video.awemeId}.mp4")
+        val clipFile = audioStore.cacheFile("tiktok_" + video.awemeId + ".mp4")
+        val tempFiles = mutableListOf<File>(clipFile)
         if (!clipFile.exists() || clipFile.length() == 0L) {
             val media = video.videoUrl ?: throw IllegalStateException("TikTok did not expose this video")
             onStage(ImportStage.DOWNLOADING, 0.2f, "Saving the video")
             downloader.download(media, clipFile) { fraction ->
-                onStage(ImportStage.DOWNLOADING, 0.2f + fraction * 0.3f, "Saving the video")
+                onStage(ImportStage.DOWNLOADING, 0.2f + fraction * 0.28f, "Saving the video")
             }
         }
 
-        onStage(ImportStage.EXTRACTING, 0.55f, "Separating the audio")
-        val clipPcm = audioStore.extractToPcm(clipFile.absolutePath)
-        if (clipPcm.isEmpty()) throw IllegalStateException("This video has no audible track")
+        try {
+            onStage(ImportStage.EXTRACTING, 0.52f, "Separating the audio")
+            val clipPcm = audioStore.extractToPcm(clipFile.absolutePath)
+            if (clipPcm.isEmpty()) throw IllegalStateException("This video has no audible track")
 
-        onStage(ImportStage.ANALYZING, 0.62f, "Analysing the sound")
-        val clipKey = AudioAnalysis.detectKey(clipPcm, PcmTools.SAMPLE_RATE)
-        val tailRatio = PcmTools.reverbTailRatio(clipPcm)
-        val keywords = "${video.musicTitle.orEmpty()} ${video.description}".lowercase()
+            onStage(ImportStage.ANALYZING, 0.60f, "Analysing the sound")
+            val clipKey = AudioAnalysis.detectKey(clipPcm, PcmTools.SAMPLE_RATE)
+            val tailRatio = PcmTools.reverbTailRatio(clipPcm)
+            val keywords = (video.musicTitle.orEmpty() + " " + video.description).lowercase()
+            val clipMs = clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
 
-        val fullFile = downloadFullSound(video, clipPcm, onStage)
-        val fullPcm = fullFile?.let { file ->
-            onStage(ImportStage.ANALYZING, 0.78f, "Matching the full song")
-            // A broken or unsupported full-song file must not lose the import;
-            // the clip is still usable and will be looped below.
-            runCatching { audioStore.extractToPcm(file.absolutePath) }
-                .getOrNull()
-                ?.takeIf { it.isNotEmpty() }
-        }
+            val tiktokFull = downloadFullSound(video, clipMs, onStage)
+            tiktokFull?.let(tempFiles::add)
+            var fullPcm = tiktokFull?.let { decodeFull(it, "Matching the full song", onStage) }
 
-        val coverPath = video.coverUrl?.let { url ->
-            runCatching {
-                val file = File(File(context.filesDir, "covers").apply { mkdirs() }, "${video.awemeId}.jpg")
-                if (!file.exists()) downloader.download(url, file)
-                file.absolutePath
-            }.getOrNull()
-        }
+            var sourceLabel = if (fullPcm != null) "tiktok" else null
+            var sourceCandidate: FullTrackCandidate? = null
 
-        onStage(ImportStage.RENDERING, 0.86f, "Rendering the track")
-        val track = if (fullPcm != null) {
-            val effect = detectEffect(clipKey, fullPcm, clipPcm, tailRatio, keywords)
-            val trimmed = trimSilence(fullPcm)
-            val rendered = TrackRenderer.render(
-                source = trimmed,
-                spec = effect,
-                targetDurationMs = null,
-                loopClip = false,
-            )
-            TikTokTrack(
+            // A short TikTok music stream is usually just the clip. Only a
+            // clearly longer stream counts as the full song.
+            if (fullPcm != null && !isFullLength(fullPcm, clipMs)) {
+                fullPcm = null
+                sourceLabel = null
+            }
+
+            if (fullPcm == null) {
+                onStage(ImportStage.ANALYZING, 0.70f, "Finding the full song")
+                val queryTitle = video.displayTitle
+                // An "original sound" is a user recording, not a licensed
+                // track; searching its caption would often download an
+                // unrelated song. Keep the real clip instead.
+                val candidate = if (video.isOriginalSound) {
+                    null
+                } else {
+                    fullTrackFinder.find(queryTitle, video.displayArtist, clipMs)
+                }
+                if (candidate != null) {
+                    onStage(ImportStage.DOWNLOADING, 0.74f, "Downloading the full song")
+                    val stream = runCatching { extractor.resolveStream(candidate.videoId) }.getOrNull()
+                    if (stream is ResolveOutcome.Ok) {
+                        val file = audioStore.cacheFile("youtube_" + candidate.videoId + ".m4a")
+                        tempFiles.add(file)
+                        val downloaded = runCatching {
+                            if (!file.exists() || file.length() == 0L) {
+                                downloader.download(
+                                    url = stream.url,
+                                    destination = file,
+                                    onProgress = { fraction ->
+                                        onStage(ImportStage.DOWNLOADING, 0.74f + fraction * 0.10f, "Downloading the full song")
+                                    },
+                                    userAgent = stream.client.userAgent,
+                                    referer = "https://www.youtube.com/",
+                                )
+                            }
+                            file
+                        }.getOrNull()
+                        if (downloaded != null) {
+                            fullPcm = decodeFull(downloaded, "Matching the full song", onStage)
+                            if (fullPcm != null && isFullLength(fullPcm, clipMs)) {
+                                sourceLabel = "youtube"
+                                sourceCandidate = candidate
+                            } else {
+                                fullPcm = null
+                            }
+                        }
+                    }
+                }
+            }
+
+            val coverPath = coroutineScope {
+                val remote = sourceCandidate?.thumbnailUrl
+                    ?: sourceCandidate?.let { "https://i.ytimg.com/vi/" + it.videoId + "/hqdefault.jpg" }
+                    ?: video.coverUrl
+                async {
+                    remote?.let { downloadCover(video.awemeId, it) }
+                }.await()
+            }
+
+            val effect = if (fullPcm != null) {
+                detectEffect(clipKey, clipPcm, fullPcm, tailRatio, keywords)
+            } else {
+                EffectSpec()
+            }
+
+            onStage(ImportStage.RENDERING, 0.90f, "Rendering the track")
+            val fromFull = fullPcm != null
+            val rendered = if (fullPcm != null) {
+                TrackRenderer.render(
+                    // Keep the full recording's timeline intact: trimming its
+                    // intro would shift every downloaded lyric line.
+                    source = fullPcm,
+                    spec = effect,
+                    targetDurationMs = null,
+                    loopClip = false,
+                )
+            } else {
+                // Keep the actual clip. Do not loop it into a fabricated
+                // two-minute track; a short real recording is the honest result.
+                TrackRenderer.render(
+                    source = trimSilence(clipPcm),
+                    spec = effect,
+                    targetDurationMs = null,
+                    loopClip = false,
+                    fadeOutMs = 600,
+                )
+            }
+
+            val artist = when {
+                sourceLabel == "youtube" -> sourceCandidate?.artist ?: video.displayArtist
+                else -> video.displayArtist ?: sourceCandidate?.artist
+            }
+            val track = TikTokTrack(
                 video = video,
                 title = video.displayTitle,
-                artist = video.displayArtist,
+                artist = artist,
                 pcm = rendered,
-                tags = buildTags(video, effect, fullSong = true),
+                tags = buildTags(video, effect, fromFull, sourceLabel),
                 coverPath = coverPath,
-                fromFullSong = true,
+                fromFullSong = fromFull,
                 effect = effect,
             )
-        } else {
-            // The sound only exists inside the video: keep its character and
-            // loop it into a full-length track instead of shipping a 15s file.
-            val targetMs = if (clipPcm.size < 90 * PcmTools.SAMPLE_RATE) 120_000L
-            else clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
-            val effect = keywordEffect()
-            val rendered = TrackRenderer.render(
-                source = trimSilence(clipPcm),
-                spec = effect,
-                targetDurationMs = targetMs,
-                loopClip = true,
-            )
-            TikTokTrack(
-                video = video,
-                title = video.displayTitle,
-                artist = video.displayArtist,
-                pcm = rendered,
-                tags = buildTags(video, effect, fullSong = false),
-                coverPath = coverPath,
-                fromFullSong = false,
-                effect = effect,
-            )
+            onStage(ImportStage.ANALYZING, 0.96f, "Finishing")
+            return track
+        } finally {
+            tempFiles.forEach { runCatching { it.delete() } }
         }
-        clipFile.delete()
-        fullFile?.delete()
-        onStage(ImportStage.ANALYZING, 0.94f, "Finishing")
-        return track
     }
 
-    /** Downloads the longer sound when TikTok exposes one. */
+    private suspend fun decodeFull(
+        file: File,
+        label: String,
+        onStage: suspend (ImportStage, Float, String) -> Unit,
+    ): ShortArray? {
+        onStage(ImportStage.ANALYZING, 0.66f, label)
+        return runCatching { audioStore.extractToPcm(file.absolutePath) }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun isFullLength(pcm: ShortArray, clipMs: Long): Boolean {
+        val ms = pcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
+        return ms >= 45_000 && ms >= clipMs + 15_000
+    }
+
+    /** Downloads TikTok's longer music stream when it is genuinely long. */
     private suspend fun downloadFullSound(
         video: TikTokVideo,
-        clipPcm: ShortArray,
+        clipMs: Long,
         onStage: suspend (ImportStage, Float, String) -> Unit,
     ): File? {
         val url = video.musicAudioUrl ?: return null
         if (video.isOriginalSound) return null
-        val clipMs = clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
-        // Only worth it when the sound is meaningfully longer than the clip.
-        if (video.musicDurationMs in 1..clipMs) return null
-        val file = audioStore.cacheFile("tiktok_music_${video.awemeId}.m4a")
+        if (video.musicDurationMs in 1..(clipMs + 15_000)) return null
+        if (video.musicDurationMs in 1..44_999) return null
+        val file = audioStore.cacheFile("tiktok_music_" + video.awemeId + ".m4a")
         return runCatching {
             if (!file.exists() || file.length() == 0L) {
-                onStage(ImportStage.DOWNLOADING, 0.68f, "Fetching the full song")
+                onStage(ImportStage.DOWNLOADING, 0.64f, "Fetching the full song")
                 downloader.download(url, file) { fraction ->
-                    onStage(ImportStage.DOWNLOADING, 0.68f + fraction * 0.08f, "Fetching the full song")
+                    onStage(ImportStage.DOWNLOADING, 0.64f + fraction * 0.07f, "Fetching the full song")
                 }
             }
             file
         }.getOrNull()
     }
+
+    private suspend fun downloadCover(awemeId: String, url: String): String? = runCatching {
+        val dir = File(context.filesDir, "covers").apply { mkdirs() }
+        val file = File(dir, awemeId + ".jpg")
+        if (!file.exists() || file.length() == 0L) downloader.download(url, file)
+        file.absolutePath
+    }.getOrNull()
 
     /**
      * Recovers the edit from the clip. Speed comes from matching the clip's
@@ -174,58 +262,48 @@ class TikTokPipeline @Inject constructor(
      */
     private fun detectEffect(
         clipKey: Int,
-        fullPcm: ShortArray,
         clipPcm: ShortArray,
+        fullPcm: ShortArray,
         tailRatio: Double,
         keywords: String,
     ): EffectSpec {
         val estimate = SpeedEstimator.estimate(clipPcm, fullPcm, PcmTools.SAMPLE_RATE)
         val speed = estimate.speed
 
-        val fullKey = AudioAnalysis.detectKey(fullPcm, PcmTools.SAMPLE_RATE)
+        // Key analysis on the first 90 s keeps a three-minute song quick.
+        val analysisWindow = if (fullPcm.size > 90 * PcmTools.SAMPLE_RATE) {
+            fullPcm.copyOfRange(0, 90 * PcmTools.SAMPLE_RATE)
+        } else {
+            fullPcm
+        }
+        val fullKey = AudioAnalysis.detectKey(analysisWindow, PcmTools.SAMPLE_RATE)
         val semitones = PcmTools.semitoneDelta(fullKey, clipKey)
         val expected = 12f * log2(speed)
-        val saysSped = keywords.contains("sped up") || keywords.contains("speed up") ||
-            keywords.contains("nightcore") || keywords.contains("speedup")
-        val saysSlowed = keywords.contains("slowed") || keywords.contains("slow +") ||
-            keywords.contains("slowed + reverb")
+        val saysNightcore = keywords.contains("nightcore")
         val coupled = when {
             speed == 1f -> false
-            speed > 1f && saysSped -> true
-            speed < 1f && saysSlowed -> true
-            abs(semitones - expected) <= 1.5f && abs(semitones) >= 1 -> true
+            saysNightcore -> true
+            abs(semitones - expected) <= 1.2f && abs(semitones) >= 1 -> true
             else -> false
         }
 
-        // When the long sound is the same version as the clip it already carries
-        // the edit's reverb and bass. Adding them again is what made imports muddy.
-        // At the same tempo there is nothing to reconstruct either, so leave the
-        // song untouched instead of guessing an effect from its tail.
-        val alreadyProcessed = estimate.sameRecording || speed == 1f
-        var reverb = if (alreadyProcessed) 0f else when {
-            tailRatio >= 0.55 -> 0.30f
-            tailRatio >= 0.42 -> 0.18f
-            tailRatio >= 0.34 -> 0.10f
+        // The clip and the full track may be different masters, so compare
+        // their tails instead of assuming either one is already processed.
+        val fullTail = PcmTools.reverbTailRatio(analysisWindow)
+        val extraTail = tailRatio - fullTail
+        val saysReverb = keywords.contains("reverb")
+        val reverb = when {
+            extraTail >= 0.22 -> 0.26f
+            extraTail >= 0.13 -> 0.16f
+            saysReverb && extraTail >= 0.04 -> 0.14f
             else -> 0f
         }
-        if (!alreadyProcessed && (keywords.contains("reverb") || keywords.contains("slowed + reverb"))) {
-            reverb = maxOf(reverb, 0.22f)
+        val bass = if (keywords.contains("bass boost") || keywords.contains("bass boosted")) {
+            3f
+        } else {
+            0f
         }
-        val bass = if (!alreadyProcessed &&
-            (keywords.contains("bass boost") || keywords.contains("bass boosted"))
-        ) 4f else 0f
         return EffectSpec(speed = speed, pitchCoupled = coupled, reverbMix = reverb, bassDb = bass)
-    }
-
-    /**
-     * When the sound only exists inside the video its effects are already
-     * baked in, so no reverb is added again. A small lift restores the low end
-     * lost in the mono downmix when the metadata says the sound was boosted.
-     */
-    private fun keywordEffect(): EffectSpec {
-        // The clip is the finished audio and already contains its own bass and
-        // reverb. Processing it again only distorts it.
-        return EffectSpec(speed = 1f, pitchCoupled = false, reverbMix = 0f, bassDb = 0f)
     }
 
     private fun trimSilence(pcm: ShortArray): ShortArray {
@@ -237,10 +315,20 @@ class TikTokPipeline @Inject constructor(
         return pcm.copyOfRange(start, end)
     }
 
-    private fun buildTags(video: TikTokVideo, effect: EffectSpec, fullSong: Boolean): List<String> = buildList {
+    private fun buildTags(
+        video: TikTokVideo,
+        effect: EffectSpec,
+        fullSong: Boolean,
+        source: String?,
+    ): List<String> = buildList {
         add("tiktok")
-        video.authorHandle?.takeIf { it.isNotBlank() }?.let { add("@$it") }
-        add(if (fullSong) "full song" else "looped")
+        video.authorHandle?.takeIf { it.isNotBlank() }?.let { add("@" + it) }
+        add(if (fullSong) "full song" else "clip only")
+        if (source == "youtube") add("youtube")
         effect.labels().forEach { add(it.lowercase()) }
+        if (abs(effect.speed - 1f) >= 0.01f) {
+            val value = (effect.speed * 100f).roundToInt() / 100f
+            add(value.toString().removeSuffix(".0") + "x")
+        }
     }
 }

@@ -26,7 +26,7 @@ object SpeedEstimator {
 
     private const val ENVELOPE_HZ = 50
     private const val MIN_CLIP_SECONDS = 3
-    private const val MATCH_SECONDS = 12
+    private const val MATCH_SECONDS = 10
 
     private val candidates: FloatArray = buildList {
         var s = 0.75f
@@ -145,7 +145,7 @@ object SpeedEstimator {
 
         var best = -1.0
         var bestOffset = 0
-        val coarse = 2
+        val coarse = 4
         var offset = 0
         while (offset + n <= track.size) {
             val score = pearson(centered, clipVar, track, sum, sumSq, offset)

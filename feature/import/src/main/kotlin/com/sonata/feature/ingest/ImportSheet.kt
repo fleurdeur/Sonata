@@ -237,7 +237,7 @@ fun ImportSheet(
         ImportAction(
             icon = Icons.Filled.Link,
             title = "Paste a link",
-            subtitle = "TikTok, direct audio; the sound becomes a full track",
+            subtitle = "TikTok or YouTube; Sonata finds the full track when it can",
             onClick = { linkText = ""; showLinkDialog = true },
         )
         ImportAction(
