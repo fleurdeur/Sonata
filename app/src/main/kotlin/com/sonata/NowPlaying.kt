@@ -209,23 +209,6 @@ class NowPlayingViewModel @Inject constructor(
         _lyrics.value = _lyrics.value?.copy(offsetMs = offsetMs.coerceIn(-2_000L, 2_000L))
     }
 
-    /**
-     * The attach job runs in the background. Watch the row briefly so the open
-     * player becomes the verified full song without asking for a restart.
-     */
-    fun awaitFullSong(id: Long, onReady: (Sound) -> Unit) {
-        viewModelScope.launch {
-            repeat(180) {
-                delay(1_000)
-                val updated = soundRepository.get(id) ?: return@launch
-                if (updated.hasVariants && updated.fullSongFilePath != null) {
-                    onReady(updated)
-                    return@launch
-                }
-            }
-        }
-    }
-
     fun switchVariant(sound: Sound, target: PlaybackVariant, onReady: (Sound) -> Unit) {
         if (sound.activeVariant == target) return
         viewModelScope.launch {
@@ -351,7 +334,6 @@ fun NowPlayingScreen(
 
     var showLyrics by rememberSaveable { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
-    var pickerQueued by remember { mutableStateOf(false) }
     var sleepMinutes by remember { mutableIntStateOf(0) }
     var abStart by remember { mutableStateOf<Long?>(null) }
     var abEnd by remember { mutableStateOf<Long?>(null) }
@@ -422,17 +404,7 @@ fun NowPlayingScreen(
                     soundId = sound.id,
                     parentJobId = null,
                     fallbackQuery = sound.title,
-                    onQueued = { pickerQueued = true },
-                    onDismiss = {
-                        pickerOpen = false
-                        if (pickerQueued) {
-                            val id = sound.id
-                            viewModel.awaitFullSong(id) { updated ->
-                                player.replaceCurrent(updated, player.state.value.positionMs)
-                            }
-                        }
-                        pickerQueued = false
-                    },
+                    onDismiss = { pickerOpen = false },
                 )
             }
 

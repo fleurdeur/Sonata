@@ -33,7 +33,7 @@ class FullSongQueue @Inject constructor(
         videoId: String,
         title: String,
         artist: String?,
-    ) {
+    ): String {
         val jobId = UUID.randomUUID().toString()
         val label = title.take(80).ifBlank { "selected recording" }
         importRepository.enqueue(
@@ -63,13 +63,16 @@ class FullSongQueue @Inject constructor(
             )
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.SECONDS)
             .addTag("sonata-import")
+            .addTag("import-job-" + jobId)
             .build()
         WorkManager.getInstance(context)
             .enqueueUniqueWork("attach-$soundId", ExistingWorkPolicy.REPLACE, request)
+        return jobId
     }
 
     suspend fun retry(job: ImportJob) {
         val videoId = videoId(job.sourceUri) ?: return
+        importRepository.cancel(job.id)
         attach(
             soundId = job.soundId ?: return,
             parentJobId = null,

@@ -40,13 +40,17 @@ class ImportQueue @Inject constructor(
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.SECONDS)
             .addTag("sonata-import")
+            .addTag("import-job-" + jobId)
             .build()
         WorkManager.getInstance(context)
             .enqueueUniqueWork("import-$jobId", ExistingWorkPolicy.KEEP, request)
     }
 
     suspend fun cancel(jobId: String) {
-        WorkManager.getInstance(context).cancelUniqueWork("import-$jobId")
+        WorkManager.getInstance(context).apply {
+            cancelUniqueWork("import-$jobId")
+            cancelAllWorkByTag("import-job-" + jobId)
+        }
         importRepository.cancel(jobId)
     }
 

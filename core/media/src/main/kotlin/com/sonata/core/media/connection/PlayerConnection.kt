@@ -218,10 +218,17 @@ class PlayerConnection @Inject constructor(
      */
     fun replaceCurrent(sound: Sound, positionMs: Long): Boolean {
         val player = controller ?: return false
-        val index = queuedSounds.indexOfFirst { it.id == sound.id }
-        if (index < 0) return false
+        val found = queuedSounds.indexOfFirst { it.id == sound.id }
+        val index = if (found >= 0) found else player.currentMediaItemIndex
+        if (index !in 0 until player.mediaItemCount) return false
         val wasPlaying = player.isPlaying
-        queuedSounds = queuedSounds.toMutableList().apply { this[index] = sound }
+        queuedSounds = if (found >= 0) {
+            queuedSounds.toMutableList().apply { this[found] = sound }
+        } else {
+            queuedSounds.toMutableList().apply {
+                if (index < size) this[index] = sound else add(sound)
+            }
+        }
         player.replaceMediaItem(index, sound.toMediaItem())
         player.seekTo(positionMs.coerceAtLeast(0L))
         if (wasPlaying) player.play()

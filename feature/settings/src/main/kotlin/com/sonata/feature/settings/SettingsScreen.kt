@@ -30,7 +30,6 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -326,11 +325,7 @@ data class StorageBreakdown(
     val totalBytes: Long get() = audioBytes + coverBytes + databaseBytes + cacheBytes
 }
 
-/**
- * Settings contains only switches that change something you can observe:
- * the theme, the accent, the equalizer, the import cache and the first-run
- * tour. Everything else was removed rather than left as a label.
- */
+/** A short, tactile control room: look, sound, library, version. */
 @Composable
 fun SettingsScreen(
     onOpenEq: () -> Unit,
@@ -358,9 +353,14 @@ fun SettingsScreen(
             .padding(horizontal = spacing.mdDp),
         contentPadding = PaddingValues(bottom = Dimensions.listBottomPadding),
     ) {
-        item { ScreenHeader(title = "Settings") }
+        item {
+            ScreenHeader(
+                title = "Sonata",
+                subtitle = "Make it yours, then forget the settings.",
+            )
+        }
 
-        item { SectionTitle("Appearance") }
+        item { SectionTitle("Look") }
         item {
             Column {
                 Text("Theme", style = MaterialTheme.typography.titleSmall)
@@ -386,29 +386,10 @@ fun SettingsScreen(
             }
         }
         item {
-            SettingToggle(
-                title = "Material You colors",
-                subtitle = "Use the wallpaper palette when the system supports it",
-                checked = settings.dynamicColor,
-                onCheckedChange = { value -> viewModel.update { it.copy(dynamicColor = value) } },
-            )
-        }
-        item {
-            SettingToggle(
-                title = "Swipe down to dismiss the mini player",
-                subtitle = "Fades the sound out; an Undo snackbar brings it back",
-                checked = settings.miniPlayerSwipeDismiss,
-                onCheckedChange = { value ->
-                    viewModel.update { it.copy(miniPlayerSwipeDismiss = value) }
-                },
-            )
-        }
-        item {
             Column(Modifier.padding(top = spacing.mdDp)) {
                 Text("Accent", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    if (settings.dynamicColor) "Mixed into the wallpaper palette"
-                    else "Used by buttons, sliders and the mini player",
+                    "Six hand-tuned accents, readable in every theme.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -442,7 +423,7 @@ fun SettingsScreen(
             }
         }
 
-        item { SectionTitle("Audio") }
+        item { SectionTitle("Sound") }
         item {
             SettingsRow(
                 title = "Equalizer",
@@ -451,33 +432,40 @@ fun SettingsScreen(
             )
         }
 
-        item { SectionTitle("Storage") }
+        item { SectionTitle("Library") }
         item {
-            SettingsRow(
-                title = "Sounds on this device",
-                subtitle = "${sounds.size} files",
-                onClick = null,
-                showChevron = false,
-            )
-        }
-        item {
-            Column(Modifier.padding(top = spacing.smDp)) {
-                Text("Library " + formatBytes(storage.audioBytes), style = MaterialTheme.typography.bodySmall)
-                Text("Covers " + formatBytes(storage.coverBytes), style = MaterialTheme.typography.bodySmall)
-                Text("Database " + formatBytes(storage.databaseBytes), style = MaterialTheme.typography.bodySmall)
-                Text(
-                    "Cache " + formatBytes(storage.cacheBytes) + " · total " + formatBytes(storage.totalBytes),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Surface(
+                Modifier.fillMaxWidth().padding(top = spacing.smDp),
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
+                Column(Modifier.padding(spacing.mdDp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                sounds.size.toString() + " sounds",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                formatBytes(storage.totalBytes) + " on this device",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { showCacheDialog = true }) {
+                            Text(if (cacheSize > 0) "Clear " + formatBytes(cacheSize) else "Clear cache")
+                        }
+                    }
+                    Text(
+                        "Audio " + formatBytes(storage.audioBytes) +
+                            " · covers " + formatBytes(storage.coverBytes) +
+                            " · cache " + formatBytes(storage.cacheBytes),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = spacing.xsDp),
+                    )
+                }
             }
-        }
-        item {
-            SettingsRow(
-                title = "Import cache",
-                subtitle = if (cacheSize > 0) formatBytes(cacheSize) + " of temporary files" else "Empty",
-                onClick = { showCacheDialog = true },
-            )
         }
         item {
             SettingsRow(
@@ -520,15 +508,8 @@ fun SettingsScreen(
             )
         }
         item {
-            SettingsRow(
-                title = "Show the introduction again",
-                subtitle = "Share sheet, imports and effects",
-                onClick = viewModel::replayIntroduction,
-            )
-        }
-        item {
             Text(
-                "Sonata keeps every sound on this device. It has no accounts, ads, analytics or network upload of your library.",
+                "Everything stays on your device.",
                 Modifier.padding(top = spacing.mdDp, bottom = spacing.lgDp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -551,27 +532,6 @@ fun SettingsScreen(
                 TextButton(onClick = { showCacheDialog = false }) { Text("Cancel") }
             },
         )
-    }
-}
-
-@Composable
-private fun SettingToggle(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

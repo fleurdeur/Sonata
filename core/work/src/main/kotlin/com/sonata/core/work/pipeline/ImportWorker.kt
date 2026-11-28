@@ -82,6 +82,20 @@ class ImportWorker @AssistedInject constructor(
         var lastReportedStage: ImportStage? = null
         var lastReportedFraction = -1f
 
+        // Show the progress notification immediately, even before the first
+        // network call, so a slow resolve never looks like a dead button.
+        runCatching {
+            setForeground(
+                ImportNotifications.foregroundInfo(
+                    applicationContext,
+                    jobId,
+                    currentTitle,
+                    currentStage,
+                    storedJob?.progress ?: 0f,
+                ),
+            )
+        }
+
         suspend fun progress(
             stage: ImportStage,
             fraction: Float,
@@ -120,6 +134,17 @@ class ImportWorker @AssistedInject constructor(
                     fullSongVerified = verified,
                     matchConfidence = confidence,
                     soundId = soundId,
+                )
+            }
+            runCatching {
+                setForeground(
+                    ImportNotifications.foregroundInfo(
+                        applicationContext,
+                        jobId,
+                        currentTitle,
+                        stage,
+                        fraction,
+                    ),
                 )
             }
         }

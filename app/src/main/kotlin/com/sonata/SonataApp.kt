@@ -1,6 +1,7 @@
 package com.sonata
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -26,6 +28,8 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -63,9 +67,14 @@ import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalRadius
 import com.sonata.core.designsystem.components.LocalHazeState
 import dev.chrisbanes.haze.hazeSource
+import com.sonata.core.domain.model.ImportJob
+import com.sonata.core.domain.model.ImportStage
+import com.sonata.core.domain.repository.ImportRepository
 import com.sonata.core.domain.repository.Settings
 import com.sonata.core.domain.repository.SettingsRepository
+import com.sonata.core.domain.repository.SoundRepository
 import com.sonata.core.media.connection.PlayerConnection
+import com.sonata.core.work.pipeline.ImportQueue
 import com.sonata.feature.home.HomeScreen
 import com.sonata.feature.ingest.ImportSheet
 import com.sonata.feature.library.LibraryScreen
@@ -74,8 +83,12 @@ import com.sonata.feature.settings.SettingsScreen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.chrisbanes.haze.rememberHazeState
 import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -92,17 +105,60 @@ private val tabs = listOf(
 class AppViewModel @Inject constructor(
     val player: PlayerConnection,
     private val settingsRepository: SettingsRepository,
+    private val importRepository: ImportRepository,
+    private val importQueue: ImportQueue,
+    private val soundRepository: SoundRepository,
 ) : ViewModel() {
 
     val settings: StateFlow<Settings> = settingsRepository.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
 
+    /** Live jobs that need a visible status anywhere in the app. */
+    val activeImports: StateFlow<List<ImportJob>> = importRepository.observeQueue()
+        .map { jobs -> jobs.filterNot { it.stage.terminal } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _importFailures = MutableSharedFlow<ImportJob>(extraBufferCapacity = 4)
+    val importFailures: SharedFlow<ImportJob> = _importFailures.asSharedFlow()
+    private val activeJobIds = mutableSetOf<String>()
+
     init {
         viewModelScope.launch { player.connect() }
+        viewModelScope.launch {
+            importRepository.observeQueue().collect { jobs ->
+                jobs.filter { it.id in activeJobIds && it.stage == ImportStage.DONE }
+                    .forEach { job ->
+                        val attachedId = job.soundId ?: return@forEach
+                        if (job.title.startsWith("Adding full song")) applyFullSong(attachedId)
+                    }
+                jobs.filter { it.id in activeJobIds && it.stage == ImportStage.FAILED }
+                    .forEach { _importFailures.tryEmit(it) }
+                activeJobIds.clear()
+                activeJobIds.addAll(jobs.filterNot { it.stage.terminal }.map { it.id })
+            }
+        }
     }
 
     fun finishOnboarding() = viewModelScope.launch {
         settingsRepository.update { it.copy(onboardingDone = true) }
+    }
+
+    fun cancelImport(jobId: String) = viewModelScope.launch {
+        importQueue.cancel(jobId)
+    }
+
+    /**
+     * The worker writes the verified full song, then reports DONE. Swap it in
+     * only when that exact sound is still playing; never yank a different track.
+     */
+    private suspend fun applyFullSong(soundId: Long) {
+        val updated = soundRepository.get(soundId) ?: return
+        if (!updated.hasVariants) return
+        if (player.state.value.current?.id != updated.id) return
+        player.replaceCurrent(
+            updated,
+            player.state.value.positionMs + updated.matchOffsetMs,
+        )
     }
 }
 
@@ -129,6 +185,7 @@ fun SonataApp(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val settings by appViewModel.settings.collectAsState()
     val playerState by appViewModel.player.state.collectAsState()
+    val activeImports by appViewModel.activeImports.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var miniPlayerHidden by remember { mutableStateOf(false) }
@@ -145,6 +202,16 @@ fun SonataApp(
         }
     }
 
+    LaunchedEffect(Unit) {
+        appViewModel.importFailures.collect { job ->
+            snackbarHostState.showSnackbar(
+                message = (job.error ?: "The import failed") + "  ·  " + job.title,
+                withDismissAction = true,
+                duration = androidx.compose.material3.SnackbarDuration.Long,
+            )
+        }
+    }
+
     val chromeVisible = route != "nowPlaying" && onboardingDone
 
     androidx.compose.runtime.CompositionLocalProvider(LocalHazeState provides hazeState) {
@@ -156,6 +223,20 @@ fun SonataApp(
                     .hazeSource(hazeState),
             ) {
                 AppNavHost(navController, onImport = { showImport = true })
+            }
+
+            val activeImport = activeImports.lastOrNull()
+            if (onboardingDone && activeImport != null) {
+                ImportStatusBanner(
+                    job = activeImport,
+                    extraCount = activeImports.size - 1,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = if (route == "nowPlaying") 58.dp else 6.dp),
+                    onOpen = { showImport = true },
+                    onCancel = { appViewModel.cancelImport(activeImport.id) },
+                )
             }
 
             if (chromeVisible) {
@@ -291,6 +372,56 @@ fun SonataApp(
                     navController.navigate("library") { launchSingleTop = true }
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun ImportStatusBanner(
+    job: ImportJob,
+    extraCount: Int,
+    modifier: Modifier = Modifier,
+    onOpen: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val fraction = job.progress.coerceIn(0f, 1f)
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clickable(onClick = onOpen),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.98f),
+        shadowElevation = 12.dp,
+    ) {
+        Column(Modifier.padding(start = 16.dp, top = 10.dp, end = 4.dp, bottom = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        job.title.ifBlank { "Importing a sound" },
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                    )
+                    Text(
+                        job.stage.label + " · " + (fraction * 100).toInt() + "%" +
+                            if (extraCount > 0) "  +$extraCount more" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                    )
+                }
+                IconButton(onClick = onCancel) {
+                    Icon(Icons.Filled.Close, contentDescription = "Cancel import")
+                }
+            }
+            if (fraction > 0.001f) {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().padding(end = 12.dp),
+                )
+            } else {
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(end = 12.dp))
+            }
         }
     }
 }
