@@ -33,6 +33,7 @@ class FullSongQueue @Inject constructor(
         videoId: String,
         title: String,
         artist: String?,
+        force: Boolean = false,
     ): String {
         val jobId = UUID.randomUUID().toString()
         val label = title.take(80).ifBlank { "selected recording" }
@@ -55,6 +56,7 @@ class FullSongQueue @Inject constructor(
                     ImportWorker.KEY_ATTACH_SOUND_ID to soundId,
                     ImportWorker.KEY_ATTACH_VIDEO_ID to videoId,
                     ImportWorker.KEY_ATTACH_ARTIST to artist,
+                    ImportWorker.KEY_ATTACH_FORCE to force,
                     ImportWorker.KEY_PARENT_JOB_ID to parentJobId,
                 ),
             )

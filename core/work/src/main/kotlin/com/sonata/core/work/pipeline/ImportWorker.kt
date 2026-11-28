@@ -37,8 +37,13 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -107,12 +112,14 @@ class ImportWorker @AssistedInject constructor(
             confidence: Float? = null,
             soundId: Long? = null,
         ) {
+            val previousTitle = currentTitle
             if (title.isNotBlank()) currentTitle = title
+            val titleChanged = title.isNotBlank() && title != previousTitle
             val now = SystemClock.elapsedRealtime()
             val stageChanged = stage != lastReportedStage
             val quiet = error == null && failure == null && verified == null &&
                 soundId == null && fraction < 0.999f
-            if (quiet && !stageChanged && now - lastReportedAt < 250L &&
+            if (quiet && !stageChanged && !titleChanged && now - lastReportedAt < 250L &&
                 abs(fraction - lastReportedFraction) < 0.03f
             ) {
                 return
@@ -157,6 +164,7 @@ class ImportWorker @AssistedInject constructor(
                     videoId = inputData.getString(KEY_ATTACH_VIDEO_ID).orEmpty(),
                     artistOverride = inputData.getString(KEY_ATTACH_ARTIST),
                     parentJobId = inputData.getString(KEY_PARENT_JOB_ID),
+                    force = inputData.getBoolean(KEY_ATTACH_FORCE, false),
                     progress = ::progress,
                 )
             } else {
@@ -302,6 +310,7 @@ class ImportWorker @AssistedInject constructor(
         videoId: String,
         artistOverride: String?,
         parentJobId: String?,
+        force: Boolean,
         progress: suspend (
             ImportStage,
             Float,
@@ -369,22 +378,27 @@ class ImportWorker @AssistedInject constructor(
             cache.delete()
             throw ImportFailureException(ImportFailureKind.EXTRACTION_FAILED, "Could not decode the chosen recording", it)
         }
-        if (fullPcm.size < PcmTools.SAMPLE_RATE * 45) {
+        if (fullPcm.size < PcmTools.SAMPLE_RATE * 20) {
             cache.delete()
-            throw ImportFailureException(ImportFailureKind.CHOSEN_TRACK_MISMATCH, "That upload is not a full song")
+            throw ImportFailureException(ImportFailureKind.SOURCE_UNAVAILABLE, "That upload is too short to be a full song")
         }
 
         progress(ImportStage.ALIGN_EDIT, 0.62f, "Checking the recording against your clip", null, null, null, null, null)
         val proof = runCatching { AcousticMatcher.match(clipPcm, fullPcm) }.getOrNull()
-        if (proof == null || !proof.verified) {
+        if (!force && (proof == null || !proof.verified)) {
             val confidence = proof?.score ?: 0f
-            cache.delete()
+            progress(ImportStage.ALIGN_EDIT, 0.62f, "", null, null, null, null, confidence)
+            // Keep the downloaded file: "Use it anyway" re-runs this exact
+            // candidate without making the user download it twice.
             throw ImportFailureException(
                 ImportFailureKind.CHOSEN_TRACK_MISMATCH,
-                "The chosen recording did not pass audio matching (" +
-                    (confidence * 100).roundToInt() + "%). Pick another result.",
+                "Audio match is only " + (confidence * 100).roundToInt() +
+                    "%. You can keep this recording anyway.",
             )
         }
+        val alignment = proof ?: AcousticMatcher.Match(verified = false)
+        val verified = alignment.verified
+        val applied = verified || force
 
         progress(ImportStage.ALIGN_EDIT, 0.74f, "Measuring the edit", null, null, null, null, null)
         val keywords = listOfNotNull(
@@ -399,22 +413,78 @@ class ImportWorker @AssistedInject constructor(
             tailRatio = PcmTools.reverbTailRatio(clipPcm),
             keywords = keywords,
             matched = proof,
+            allowUnverified = force,
         )
-        val rendered = TrackRenderer.render(
-            source = fullPcm,
-            spec = effect,
-            targetDurationMs = null,
-            loopClip = false,
-        )
-
-        progress(ImportStage.ENCODE_AAC, 0.86f, "Encoding the full song", null, null, null, null, null)
-        val destination = audioStore.newSoundFile("m4a")
-        val written = PcmFileWriter.write(rendered, PcmTools.SAMPLE_RATE, destination)
-        val durationMs = rendered.size.toLong() * 1_000L / PcmTools.SAMPLE_RATE
-        val bpm = AudioAnalysis.detectBpm(rendered, PcmTools.SAMPLE_RATE)
-        val key = AudioAnalysis.detectKeyEstimate(rendered, PcmTools.SAMPLE_RATE).let {
-            MusicalKey.fromPitchClass(it.pitchClass, minor = it.minor && it.confidence >= 0.04f)
+        // Rendering and encoding are one long stage. Report a live local
+        // fraction and an ETA based on actual elapsed work instead of jumping
+        // from 86% to done with no idea whether the worker is alive.
+        val encodePhaseStart = AtomicReference(SystemClock.elapsedRealtime())
+        val encodeFraction = AtomicReference(0f)
+        val encodePhase = AtomicReference("Rendering the full song")
+        var renderedPcm: ShortArray? = null
+        var writtenFile: File? = null
+        coroutineScope {
+            val ticker = launch {
+                while (isActive) {
+                    val fraction = encodeFraction.get().coerceIn(0f, 1f)
+                    val phaseFraction = if (fraction <= 0.55f) {
+                        fraction / 0.55f
+                    } else {
+                        ((fraction - 0.55f) / 0.45f).coerceIn(0f, 1f)
+                    }
+                    progress(
+                        ImportStage.ENCODE_AAC,
+                        0.80f + fraction * 0.18f,
+                        encodeLabel(
+                            encodePhase.get(),
+                            phaseFraction,
+                            SystemClock.elapsedRealtime() - encodePhaseStart.get(),
+                        ),
+                        null, null, null, null, null,
+                    )
+                    delay(1_000L)
+                }
+            }
+            try {
+                progress(ImportStage.ENCODE_AAC, 0.80f, "Rendering the full song", null, null, null, null, null)
+                renderedPcm = TrackRenderer.render(
+                    source = fullPcm,
+                    spec = effect,
+                    targetDurationMs = null,
+                    loopClip = false,
+                ) { fraction ->
+                    encodeFraction.set(fraction.coerceIn(0f, 1f) * 0.55f)
+                }
+                encodePhase.set("Writing the audio file")
+                encodePhaseStart.set(SystemClock.elapsedRealtime())
+                encodeFraction.set(0.55f)
+                progress(ImportStage.ENCODE_AAC, 0.899f, "Writing the audio file", null, null, null, null, null)
+                val destination = audioStore.newSoundFile("m4a")
+                writtenFile = PcmFileWriter.write(
+                    pcm = renderedPcm ?: ShortArray(0),
+                    sampleRate = PcmTools.SAMPLE_RATE,
+                    m4a = destination,
+                    onProgress = { fraction ->
+                        val next = 0.55f + fraction.coerceIn(0f, 1f) * 0.45f
+                        encodeFraction.accumulateAndGet(next) { old, candidate -> maxOf(old, candidate) }
+                    },
+                )
+            } finally {
+                ticker.cancel()
+            }
         }
+        val rendered = renderedPcm ?: throw IllegalStateException("The rendered audio was empty")
+        val written = writtenFile ?: throw IllegalStateException("The encoded audio file was not written")
+        val durationMs = rendered.size.toLong() * 1_000L / PcmTools.SAMPLE_RATE
+        // The file is already safe on disk at this point. A metadata analyser
+        // must never turn a successful encode into a failed import.
+        val bpm = runCatching { AudioAnalysis.detectBpm(rendered, PcmTools.SAMPLE_RATE) }
+            .getOrDefault(sound.bpm ?: 0)
+        val key = runCatching {
+            AudioAnalysis.detectKeyEstimate(rendered, PcmTools.SAMPLE_RATE).let {
+                MusicalKey.fromPitchClass(it.pitchClass, minor = it.minor && it.confidence >= 0.04f)
+            }
+        }.getOrDefault(MusicalKey.fromPitchClass(0))
         val clipFile = sound.clipFilePath?.takeIf { it.isNotBlank() } ?: sound.filePath
         val oldFull = sound.fullSongFilePath?.takeIf { it.isNotBlank() }
         val oldTags = sound.tags.split('|').filterNot { tag ->
@@ -426,7 +496,7 @@ class ImportWorker @AssistedInject constructor(
         }
         val newTags = (oldTags + buildList {
             add("full song")
-            add("verified")
+            add(if (verified) "verified" else "chosen")
             add("youtube")
             add("tiktok")
             effect.labels().forEach { add(it.lowercase()) }
@@ -434,7 +504,7 @@ class ImportWorker @AssistedInject constructor(
                 val value = (effect.speed * 100f).roundToInt() / 100f
                 add(value.toString().removeSuffix(".0") + "x")
             }
-            add("match " + (proof.score * 100).roundToInt().coerceIn(0, 100) + "%")
+            add("match " + (alignment.score * 100).roundToInt().coerceIn(0, 100) + "%")
         }).distinct()
         val artist = artistOverride
             ?.replace(Regex("(?i)\\s*[-–—]\\s*topic$"), "")
@@ -445,8 +515,8 @@ class ImportWorker @AssistedInject constructor(
             filePath = written.absolutePath,
             fullSongFilePath = written.absolutePath,
             clipFilePath = clipFile,
-            offsetMs = proof.offsetMs,
-            confidence = proof.score,
+            offsetMs = if (applied) alignment.offsetMs else 0L,
+            confidence = alignment.score,
             speed = effect.speed,
             durationMs = durationMs,
             sampleRate = PcmTools.SAMPLE_RATE,
@@ -454,18 +524,21 @@ class ImportWorker @AssistedInject constructor(
             key = key.name,
             tags = newTags.joinToString("|"),
             artist = artist,
-            waveformJson = AudioAnalysis.waveform(rendered).toList().encodeWaveform(),
-            loudnessLufs = AudioAnalysis.loudnessLufs(rendered),
+            waveformJson = runCatching {
+                AudioAnalysis.waveform(rendered).toList().encodeWaveform()
+            }.getOrElse { sound.waveformJson },
+            loudnessLufs = runCatching { AudioAnalysis.loudnessLufs(rendered) }
+                .getOrDefault(sound.loudnessLufs ?: -14f),
         )
         if (oldFull != null && oldFull != written.absolutePath) {
             runCatching { File(oldFull).delete() }
         }
         cache.delete()
-        if (proof.offsetMs > 0L) {
+        if (applied && alignment.offsetMs > 0L) {
             runCatching {
                 cueRepository.ensure(
                     soundId = soundId,
-                    positionMs = proof.offsetMs,
+                    positionMs = alignment.offsetMs,
                     label = "TikTok moment",
                     kind = CueKind.MEMORY,
                 )
@@ -477,8 +550,8 @@ class ImportWorker @AssistedInject constructor(
                     jobId = parent,
                     stage = ImportStage.DONE,
                     progress = 1f,
-                    fullSongVerified = true,
-                    matchConfidence = proof.score,
+                    fullSongVerified = verified,
+                    matchConfidence = alignment.score,
                 )
             }
         }
@@ -751,6 +824,21 @@ class ImportWorker @AssistedInject constructor(
         return Stored(id, title, duplicate = false, trimStart = silenceStart, trimEnd = silenceEnd)
     }
 
+    /** Progress line with a measured ETA, e.g. "Writing the audio file · 72% · about 8s left". */
+    private fun encodeLabel(phase: String, fraction: Float, elapsedMs: Long): String {
+        val clamped = fraction.coerceIn(0f, 1f)
+        if (clamped <= 0.01f) return phase
+        val percent = (clamped * 100f).roundToInt().coerceIn(1, 100)
+        val remainingMs = if (clamped > 0f) (elapsedMs * (1f - clamped) / clamped).toLong() else 0L
+        val seconds = (remainingMs / 1_000L).coerceAtLeast(1L)
+        val eta = if (seconds < 60L) {
+            "about " + seconds + "s left"
+        } else {
+            "about " + ((seconds + 59L) / 60L) + " min left"
+        }
+        return phase + " · " + percent + "% · " + eta
+    }
+
     private fun classify(t: Throwable, stage: ImportStage): ImportFailureKind {
         if (t is ImportFailureException) return t.kind
         val message = t.message.orEmpty()
@@ -835,6 +923,7 @@ class ImportWorker @AssistedInject constructor(
         const val KEY_ATTACH_SOUND_ID = "attachSoundId"
         const val KEY_ATTACH_VIDEO_ID = "attachVideoId"
         const val KEY_ATTACH_ARTIST = "attachArtist"
+        const val KEY_ATTACH_FORCE = "attachForce"
         const val KEY_PARENT_JOB_ID = "parentJobId"
         const val KEY_DUPLICATE = "duplicate"
         const val KEY_TRIM_START = "trimStart"

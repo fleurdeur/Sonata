@@ -40,18 +40,38 @@ object TrackRenderer {
         sampleRate: Int = PcmTools.SAMPLE_RATE,
         fadeInMs: Int = 120,
         fadeOutMs: Int = 1_200,
+        onProgress: ((Float) -> Unit)? = null,
     ): ShortArray {
         if (source.isEmpty()) return source
         var pcm = source
+        var owned = false
+        onProgress?.invoke(0.02f)
         if (abs(spec.speed - 1f) >= 0.01f) {
-            pcm = if (spec.pitchCoupled) {
-                PcmTools.resample(pcm, spec.speed)
-            } else {
-                PcmTools.timeStretch(pcm, spec.speed, sampleRate)
+            val speedProgress: (Float) -> Unit = { fraction ->
+                onProgress?.invoke(0.05f + fraction.coerceIn(0f, 1f) * 0.55f)
             }
+            pcm = if (spec.pitchCoupled) {
+                PcmTools.resample(pcm, spec.speed, speedProgress)
+            } else {
+                PcmTools.timeStretch(pcm, spec.speed, sampleRate, speedProgress)
+            }
+            owned = pcm !== source
         }
-        if (abs(spec.bassDb) >= 0.5f) pcm = PcmTools.bassBoost(pcm, spec.bassDb.toDouble(), sampleRate = sampleRate)
-        if (spec.reverbMix >= 0.01f) pcm = PcmTools.reverb(pcm, spec.reverbMix, sampleRate)
+        onProgress?.invoke(0.62f)
+        if (abs(spec.bassDb) >= 0.5f) {
+            pcm = PcmTools.bassBoost(pcm, spec.bassDb.toDouble(), sampleRate = sampleRate)
+            owned = true
+        }
+        onProgress?.invoke(0.68f)
+        if (spec.reverbMix >= 0.01f) {
+            pcm = PcmTools.reverb(
+                pcm,
+                spec.reverbMix,
+                sampleRate,
+                onProgress = { fraction -> onProgress?.invoke(0.68f + fraction.coerceIn(0f, 1f) * 0.24f) },
+            )
+            owned = true
+        }
 
         if (targetDurationMs != null && targetDurationMs > 0) {
             val targetSamples = (targetDurationMs * sampleRate / 1000).toInt()
@@ -60,8 +80,15 @@ object TrackRenderer {
                 pcm.size < targetSamples && loopClip -> PcmTools.loopToLength(pcm, targetDurationMs, sampleRate = sampleRate)
                 else -> pcm
             }
+            owned = true
         }
-        pcm = PcmTools.fade(pcm, fadeInMs, fadeOutMs, sampleRate)
-        return PcmTools.normalize(pcm)
+        // An effect-free render still owns its output before the in-place
+        // fade/normalize pass, so the caller's PCM is never mutated.
+        if (!owned) pcm = source.copyOf()
+        pcm = PcmTools.fadeInPlace(pcm, fadeInMs, fadeOutMs, sampleRate)
+        onProgress?.invoke(0.96f)
+        pcm = PcmTools.normalizeInPlace(pcm)
+        onProgress?.invoke(1f)
+        return pcm
     }
 }

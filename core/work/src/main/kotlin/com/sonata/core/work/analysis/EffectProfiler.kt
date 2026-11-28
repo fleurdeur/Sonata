@@ -4,7 +4,9 @@ import com.sonata.core.audio.render.AcousticMatcher
 import com.sonata.core.audio.render.EffectSpec
 import com.sonata.core.audio.render.PcmTools
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.log2
+import kotlin.math.sqrt
 
 /**
  * Recovers the edit that was applied to the shared clip. Speed and pitch are
@@ -21,9 +23,19 @@ object EffectProfiler {
         tailRatio: Double,
         keywords: String,
         matched: AcousticMatcher.Match?,
+        allowUnverified: Boolean = false,
     ): EffectSpec {
-        val speed = matched?.speed?.takeIf { matched.verified } ?: 1f
-        val sourceOffset = ((matched?.offsetMs ?: 0L).toFloat() * speed).coerceAtLeast(0f).toLong()
+        // An explicit, user-picked recording is allowed to proceed even when
+        // the matcher cannot certify it. Keep its tempo when the alignment is
+        // at least plausible, otherwise fall back to the clean recording.
+        val usable = matched != null &&
+            (matched.verified || (allowUnverified && matched.score >= 0.15f))
+        val speed = if (usable) matched.speed else 1f
+        val sourceOffset = if (usable) {
+            (matched.offsetMs.toFloat() * speed).coerceAtLeast(0f).toLong()
+        } else {
+            0L
+        }
         val start = (sourceOffset - 15_000L).coerceAtLeast(0L)
         val end = (start + 60_000L).coerceAtMost(fullPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE)
         val from = (start * PcmTools.SAMPLE_RATE / 1000).toInt().coerceIn(0, fullPcm.size)
@@ -58,11 +70,31 @@ object EffectProfiler {
             saysReverb && extraTail >= 0.04 -> 0.14f
             else -> 0f
         }
-        val bass = if (keywords.contains("bass boost") || keywords.contains("bass boosted")) {
-            3f
-        } else {
-            0f
+        val clipLow = lowBandRatio(clipPcm)
+        val fullLow = lowBandRatio(analysisWindow)
+        val extraLow = clipLow - fullLow
+        val bass = when {
+            keywords.contains("bass boost") || keywords.contains("bass boosted") -> 3f
+            extraLow >= 0.10 -> 3f
+            extraLow >= 0.05 -> 2f
+            else -> 0f
         }
         return EffectSpec(speed = speed, pitchCoupled = coupled, reverbMix = reverb, bassDb = bass)
+    }
+
+    /** Share of energy below ~140 Hz, used to detect a bass-boosted edit. */
+    private fun lowBandRatio(pcm: ShortArray): Double {
+        if (pcm.isEmpty()) return 0.0
+        val alpha = 1.0 - exp(-2.0 * Math.PI * 140.0 / PcmTools.SAMPLE_RATE)
+        var lowState = 0.0
+        var lowEnergy = 0.0
+        var allEnergy = 0.0
+        for (sample in pcm) {
+            val value = sample / 32768.0
+            lowState += alpha * (value - lowState)
+            lowEnergy += lowState * lowState
+            allEnergy += value * value
+        }
+        return if (allEnergy <= 1e-12) 0.0 else sqrt(lowEnergy / allEnergy).coerceIn(0.0, 1.0)
     }
 }

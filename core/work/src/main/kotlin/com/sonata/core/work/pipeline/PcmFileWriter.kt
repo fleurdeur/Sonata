@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.SystemClock
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -18,17 +19,40 @@ import java.nio.ByteOrder
  */
 object PcmFileWriter {
 
-    const val BITRATE = 256_000
+    const val BITRATE = 192_000
+    private const val FALLBACK_BITRATE = 128_000
 
-    fun write(pcm: ShortArray, sampleRate: Int, m4a: File): File {
+    fun write(
+        pcm: ShortArray,
+        sampleRate: Int,
+        m4a: File,
+        onProgress: ((Float) -> Unit)? = null,
+    ): File {
         val wavFile = File(m4a.parentFile, m4a.nameWithoutExtension + ".wav")
-        if (pcm.isEmpty()) return wav(pcm, sampleRate, wavFile)
-        val encoded = runCatching { aac(pcm, sampleRate, m4a) }.getOrNull()
-        if (encoded != null && isComplete(encoded, pcm.size, sampleRate)) return encoded
-        encoded?.delete()
+        if (pcm.isEmpty()) return wav(pcm, sampleRate, wavFile, onProgress)
+        var encoded = runCatching { aac(pcm, sampleRate, m4a, BITRATE, onProgress) }
+            .onFailure { android.util.Log.w("SonataRender", "AAC encoder failed; retrying safer bitrate", it) }
+            .getOrNull()
+        if (encoded != null && isComplete(encoded, pcm.size, sampleRate)) {
+            onProgress?.invoke(1f)
+            return encoded
+        }
+        // Some vendor encoders reject or truncate high mono bitrates. One
+        // cheaper retry is still far better than dropping the import.
+        runCatching { encoded?.delete() }
+        m4a.delete()
+        encoded = runCatching { aac(pcm, sampleRate, m4a, FALLBACK_BITRATE, onProgress) }
+            .onFailure { android.util.Log.w("SonataRender", "AAC retry failed; using WAV", it) }
+            .getOrNull()
+        if (encoded != null && isComplete(encoded, pcm.size, sampleRate)) {
+            onProgress?.invoke(1f)
+            return encoded
+        }
+        runCatching { encoded?.delete() }
         m4a.delete()
         android.util.Log.w("SonataRender", "AAC output failed duration verification; writing exact WAV")
-        return wav(pcm, sampleRate, wavFile)
+        onProgress?.invoke(0.96f)
+        return wav(pcm, sampleRate, wavFile, onProgress)
     }
 
     /** Container duration check: reject a file that lost more than 250 ms. */
@@ -56,10 +80,16 @@ object PcmFileWriter {
         }
     }
 
-    private fun aac(pcm: ShortArray, sampleRate: Int, outFile: File): File {
+    private fun aac(
+        pcm: ShortArray,
+        sampleRate: Int,
+        outFile: File,
+        bitrate: Int,
+        onProgress: ((Float) -> Unit)?,
+    ): File {
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 32 * 1024)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -75,12 +105,27 @@ object PcmFileWriter {
             var samplePosition = 0
             var inputDone = false
             var outputDone = false
+            var lastProgress = -1f
+            val startedAt = SystemClock.elapsedRealtime()
+            // A hardware encoder normally finishes far faster than real time.
+            // If a vendor codec wedges, fail over to WAV instead of spinning
+            // forever while the user sees "Encoding".
+            val timeoutMs = minOf(
+                90_000L,
+                maxOf(45_000L, pcm.size.toLong() * 1_000L / sampleRate * 2L),
+            )
 
             while (!outputDone) {
+                if (SystemClock.elapsedRealtime() - startedAt > timeoutMs) {
+                    throw IllegalStateException("The AAC encoder stopped responding")
+                }
                 if (!inputDone) {
-                    val inIndex = codec.dequeueInputBuffer(10_000)
+                    // Do not wait on input. Waiting here and then waiting for
+                    // output made a long track crawl at ~10 ms per buffer.
+                    val inIndex = codec.dequeueInputBuffer(0)
                     if (inIndex >= 0) {
-                        val input = codec.getInputBuffer(inIndex)!!
+                        val input = codec.getInputBuffer(inIndex)
+                            ?: throw IllegalStateException("The AAC encoder returned no input buffer")
                         input.clear()
                         val remaining = pcm.size - samplePosition
                         if (remaining <= 0) {
@@ -120,6 +165,11 @@ object PcmFileWriter {
                     codec.releaseOutputBuffer(outIndex, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
                 }
+                val fraction = if (pcm.isEmpty()) 1f else samplePosition.toFloat() / pcm.size
+                if (onProgress != null && fraction - lastProgress >= 0.01f) {
+                    lastProgress = fraction
+                    onProgress(fraction.coerceIn(0f, 1f))
+                }
             }
             return outFile
         } finally {
@@ -134,7 +184,12 @@ object PcmFileWriter {
         samplePosition.toLong() * 1_000_000L / sampleRate
 
     /** 16-bit mono PCM WAV, the exact always-available fallback. */
-    fun wav(pcm: ShortArray, sampleRate: Int, outFile: File): File {
+    fun wav(
+        pcm: ShortArray,
+        sampleRate: Int,
+        outFile: File,
+        onProgress: ((Float) -> Unit)? = null,
+    ): File {
         outFile.parentFile?.mkdirs()
         val dataSize = pcm.size * 2
         RandomAccessFile(outFile, "rw").use { file ->
@@ -152,9 +207,24 @@ object PcmFileWriter {
             file.writeShortLe(16)
             file.write("data".toByteArray())
             file.writeIntLe(dataSize)
-            val buffer = ByteBuffer.allocate(pcm.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-            buffer.asShortBuffer().put(pcm)
-            file.write(buffer.array())
+            // Stream the samples instead of materializing a second copy of the
+            // whole song as a byte array. A five-minute track is ~26 MB of PCM.
+            val buffer = ByteArray(16 * 1024)
+            var index = 0
+            while (index < pcm.size) {
+                val count = minOf((buffer.size / 2), pcm.size - index)
+                for (j in 0 until count) {
+                    val value = pcm[index + j].toInt()
+                    buffer[j * 2] = (value and 0xFF).toByte()
+                    buffer[j * 2 + 1] = ((value shr 8) and 0xFF).toByte()
+                }
+                file.write(buffer, 0, count * 2)
+                index += count
+                if (onProgress != null && index % (64 * 1024) < count) {
+                    onProgress(index.toFloat() / pcm.size)
+                }
+            }
+            onProgress?.invoke(1f)
         }
         return outFile
     }

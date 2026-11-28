@@ -35,6 +35,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sonata.core.designsystem.LocalSpacing
 import com.sonata.core.designsystem.Spacing
+import com.sonata.core.domain.model.ImportFailureKind
 import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.domain.model.SearchResult
@@ -56,6 +57,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 data class FullSongPickerState(
     val soundId: Long = 0L,
@@ -67,6 +69,7 @@ data class FullSongPickerState(
     val attaching: Boolean = false,
     val jobId: String? = null,
     val job: ImportJob? = null,
+    val selected: SearchResult? = null,
     val searched: Boolean = false,
 )
 
@@ -82,8 +85,10 @@ class FullSongPickerViewModel @Inject constructor(
     private val _state = MutableStateFlow(FullSongPickerState())
     val state: StateFlow<FullSongPickerState> = _state.asStateFlow()
     private var searchJob: Job? = null
+    private var watcher: Job? = null
 
     fun open(soundId: Long, parentJobId: String?, fallbackQuery: String) {
+        watcher?.cancel()
         _state.value = FullSongPickerState(soundId = soundId, parentJobId = parentJobId)
         viewModelScope.launch {
             val sound = runCatching { soundRepository.get(soundId) }.getOrNull()
@@ -144,7 +149,7 @@ class FullSongPickerViewModel @Inject constructor(
     fun attach(candidate: SearchResult) {
         val current = _state.value
         if (current.attaching || current.jobId != null) return
-        _state.update { it.copy(attaching = true, error = null) }
+        _state.update { it.copy(attaching = true, selected = candidate, error = null) }
         viewModelScope.launch {
             val result = runCatching {
                 queue.attach(
@@ -172,9 +177,55 @@ class FullSongPickerViewModel @Inject constructor(
         }
     }
 
+    /**
+     * The match was too weak for automatic proof, but this is the recording
+     * the user picked. Re-run the same cached file and keep the measured edit.
+     */
+    fun useAnyway() {
+        val current = _state.value
+        val candidate = current.selected ?: return
+        if (current.attaching) return
+        val oldJob = current.jobId
+        watcher?.cancel()
+        _state.update {
+            it.copy(
+                attaching = true,
+                jobId = null,
+                job = null,
+                error = null,
+            )
+        }
+        viewModelScope.launch {
+            if (oldJob != null) importQueue.cancel(oldJob)
+            val result = runCatching {
+                queue.attach(
+                    soundId = current.soundId,
+                    parentJobId = current.parentJobId,
+                    videoId = candidate.id,
+                    title = candidate.title,
+                    artist = candidate.author,
+                    force = true,
+                )
+            }
+            result.onSuccess { jobId ->
+                _state.update { it.copy(attaching = false, jobId = jobId, error = null) }
+                watchJob(jobId)
+            }.onFailure { failure ->
+                if (failure is CancellationException) throw failure
+                _state.update {
+                    it.copy(
+                        attaching = false,
+                        error = failure.message ?: "Could not apply that recording",
+                    )
+                }
+            }
+        }
+    }
+
     /** The attach worker is the source of truth; show its real checkpoints. */
     private fun watchJob(jobId: String) {
-        viewModelScope.launch {
+        watcher?.cancel()
+        watcher = viewModelScope.launch {
             while (isActive) {
                 val job = runCatching { importRepository.get(jobId) }.getOrNull()
                 if (job == null) {
@@ -191,8 +242,11 @@ class FullSongPickerViewModel @Inject constructor(
         }
     }
 
-    fun pickAgain() = _state.update {
-        it.copy(jobId = null, job = null, error = null, attaching = false)
+    fun pickAgain() {
+        watcher?.cancel()
+        _state.update {
+            it.copy(jobId = null, job = null, error = null, attaching = false)
+        }
     }
 
     fun cancelJob() {
@@ -312,7 +366,12 @@ fun FullSongPickerDialog(
                     }
                 }
             } else {
-                AttachProgress(job, spacing, viewModel::cancelJob)
+                AttachProgress(
+                    job = job,
+                    spacing = spacing,
+                    onCancel = viewModel::cancelJob,
+                    onUseAnyway = viewModel::useAnyway,
+                )
             }
         },
         confirmButton = {
@@ -338,8 +397,14 @@ fun FullSongPickerDialog(
 }
 
 @Composable
-private fun AttachProgress(job: ImportJob, spacing: Spacing, onCancel: () -> Unit) {
+private fun AttachProgress(
+    job: ImportJob,
+    spacing: Spacing,
+    onCancel: () -> Unit,
+    onUseAnyway: () -> Unit,
+) {
     val fraction = job.progress.coerceIn(0f, 1f)
+    val percent = job.matchConfidence?.let { (it.coerceIn(0f, 1f) * 100f).roundToInt() }
     Column(Modifier.fillMaxWidth()) {
         when (job.stage) {
             ImportStage.DONE -> Row(
@@ -354,9 +419,16 @@ private fun AttachProgress(job: ImportJob, spacing: Spacing, onCancel: () -> Uni
                     modifier = Modifier.size(28.dp),
                 )
                 Column {
-                    Text("Verified and applied", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "The edit was measured from the recording and the player has switched to it.",
+                        if (job.fullSongVerified == false) "Chosen recording applied" else "Verified and applied",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        if (job.fullSongVerified == false) {
+                            "The audio match was low, but you chose it. Its measured speed, pitch, reverb and bass were carried into the full song."
+                        } else {
+                            "The edit was measured from the recording and the player has switched to it."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -365,9 +437,21 @@ private fun AttachProgress(job: ImportJob, spacing: Spacing, onCancel: () -> Uni
 
             ImportStage.FAILED -> {
                 Text(
-                    "That upload did not pass the audio check.",
+                    if (job.failure == ImportFailureKind.CHOSEN_TRACK_MISMATCH) {
+                        "The audio match is low"
+                    } else {
+                        "That upload did not pass the audio check."
+                    },
                     style = MaterialTheme.typography.titleSmall,
                 )
+                if (percent != null) {
+                    Text(
+                        "Audio similarity: " + percent + "%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = spacing.xsDp),
+                    )
+                }
                 Text(
                     job.error ?: "No verified match.",
                     style = MaterialTheme.typography.bodySmall,
@@ -375,11 +459,21 @@ private fun AttachProgress(job: ImportJob, spacing: Spacing, onCancel: () -> Uni
                     modifier = Modifier.padding(top = spacing.xsDp),
                 )
                 Text(
-                    "Your clip is unchanged. Try the official audio or a different upload.",
+                    if (job.failure == ImportFailureKind.CHOSEN_TRACK_MISMATCH) {
+                        "Use it anyway to keep this exact recording and carry your clip's effects into it. Or try another result."
+                    } else {
+                        "Your clip is unchanged. Try another upload."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = spacing.xsDp),
                 )
+                if (job.failure == ImportFailureKind.CHOSEN_TRACK_MISMATCH) {
+                    TextButton(
+                        onClick = onUseAnyway,
+                        modifier = Modifier.padding(top = spacing.xsDp),
+                    ) { Text("Use it anyway") }
+                }
             }
 
             else -> {

@@ -3,6 +3,7 @@ package com.sonata
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,6 +17,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +27,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -38,6 +42,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -49,6 +54,8 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,6 +64,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -71,12 +80,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -369,15 +380,14 @@ fun NowPlayingScreen(
         }
     }
 
-    val background = MaterialTheme.colorScheme.background
-    val gradient = Brush.verticalGradient(
-        0f to MaterialTheme.colorScheme.primary.copy(alpha = 0.20f),
-        0.42f to MaterialTheme.colorScheme.background,
-        1f to MaterialTheme.colorScheme.background,
-    )
-
-    Box(Modifier.fillMaxSize().background(gradient)) {
-        Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+    Box(Modifier.fillMaxSize()) {
+        PlayerBackdrop(sound)
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
             NowPlayingTopBar(
                 sound = sound,
                 favorite = sound != null && sound.id in favorites,
@@ -388,6 +398,7 @@ fun NowPlayingScreen(
                     sound?.let { viewModel.toggleFavorite(it.id, it.id in favorites) }
                 },
                 onExport = { sound?.let { exportSound(context, it) } },
+                onOpenEq = onOpenEq,
                 onFindFullSong = if (sound != null && !sound.hasVariants &&
                     (sound.tiktokMusicId != null ||
                         sound.tags.any {
@@ -448,12 +459,18 @@ fun NowPlayingScreen(
                     PlayerPage(
                         sound = sound,
                         state = state,
+                        player = player,
                         lyrics = lyrics,
                         lyricsLoading = lyricsLoading,
+                        favorite = sound != null && sound.id in favorites,
                         abStart = abStart,
                         abEnd = abEnd,
                         sleepMinutes = sleepMinutes,
                         onOpenLyrics = { showLyrics = true },
+                        onToggleFavorite = {
+                            sound?.let { viewModel.toggleFavorite(it.id, it.id in favorites) }
+                        },
+                        onOpenEq = onOpenEq,
                         onToggleSleep = {
                             sleepMinutes = when (sleepMinutes) {
                                 0 -> 15
@@ -539,13 +556,6 @@ fun NowPlayingScreen(
                     onDeleteCue = viewModel::deleteCue,
                 )
             }
-
-            PlayerDock(
-                state = state,
-                sound = sound,
-                player = player,
-                onOpenEq = onOpenEq,
-            )
         }
     }
 }
@@ -618,7 +628,7 @@ private fun VariantSwitcher(
 }
 
 @Composable
-private fun NowPlayingTopBar(
+private fun LegacyNowPlayingTopBar(
     sound: Sound?,
     favorite: Boolean,
     lyricsActive: Boolean,
@@ -683,7 +693,7 @@ private fun NowPlayingTopBar(
 }
 
 @Composable
-private fun PlayerPage(
+private fun LegacyPlayerPage(
     sound: Sound?,
     state: com.sonata.core.media.connection.PlayerState,
     lyrics: Lyrics?,
@@ -855,7 +865,7 @@ private fun PlayerPage(
 }
 
 @Composable
-private fun PlayerDock(
+private fun LegacyPlayerDock(
     state: com.sonata.core.media.connection.PlayerState,
     sound: Sound?,
     player: PlayerConnection,
@@ -931,6 +941,468 @@ private fun PlayerDock(
             IconButton(onClick = onOpenEq) {
                 Icon(Icons.Outlined.GraphicEq, contentDescription = "Equalizer")
             }
+        }
+    }
+}
+
+@Composable
+private fun NowPlayingTopBar(
+    sound: Sound?,
+    favorite: Boolean,
+    lyricsActive: Boolean,
+    onCollapse: () -> Unit,
+    onToggleLyrics: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onExport: () -> Unit,
+    onOpenEq: () -> Unit,
+    onFindFullSong: (() -> Unit)? = null,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onCollapse) {
+            Icon(
+                Icons.Filled.ExpandMore,
+                contentDescription = "Collapse player",
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "NOW PLAYING",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.8.sp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                if (lyricsActive) "Lyrics" else sourceName(sound),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More player options")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (favorite) "Remove from favorites" else "Add to favorites") },
+                    leadingIcon = {
+                        Icon(
+                            if (favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                            contentDescription = null,
+                        )
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onToggleFavorite()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (lyricsActive) "Show player" else "Show lyrics") },
+                    leadingIcon = { Icon(Icons.Outlined.Lyrics, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onToggleLyrics()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Equalizer") },
+                    leadingIcon = { Icon(Icons.Outlined.GraphicEq, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onOpenEq()
+                    },
+                )
+                onFindFullSong?.let { find ->
+                    DropdownMenuItem(
+                        text = { Text("Choose the full song") },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            find()
+                        },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Export audio") },
+                    leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
+                    enabled = sound != null,
+                    onClick = {
+                        menuOpen = false
+                        onExport()
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Full-bleed, blurred artwork behind the whole player, like ArchiveTune. */
+@Composable
+private fun PlayerBackdrop(sound: Sound?) {
+    val cover = sound?.coverPath
+    Box(Modifier.fillMaxSize()) {
+        if (cover != null && File(cover).exists()) {
+            AsyncImage(
+                model = File(cover),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 1.35f
+                        scaleY = 1.35f
+                        alpha = if (Build.VERSION.SDK_INT >= 31) 1f else 0.38f
+                    }
+                    .blur(70.dp),
+            )
+        } else {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.42f),
+                                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.20f),
+                                MaterialTheme.colorScheme.background,
+                            ),
+                        ),
+                    ),
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to MaterialTheme.colorScheme.background.copy(alpha = 0.34f),
+                        0.42f to MaterialTheme.colorScheme.background.copy(alpha = 0.58f),
+                        1f to MaterialTheme.colorScheme.background,
+                    ),
+                ),
+        )
+    }
+}
+
+@Composable
+private fun ArtworkHero(
+    sound: Sound?,
+    artSize: androidx.compose.ui.unit.Dp,
+    onChangeCover: () -> Unit,
+) {
+    val radius = RoundedCornerShape(28.dp)
+    Box(Modifier.size(artSize), contentAlignment = Alignment.Center) {
+        val cover = sound?.coverPath
+        if (cover != null && File(cover).exists()) {
+            AsyncImage(
+                model = File(cover),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(artSize)
+                    .graphicsLayer {
+                        scaleX = 1.08f
+                        scaleY = 1.08f
+                        alpha = 0.55f
+                    }
+                    .blur(38.dp),
+            )
+        }
+        Box(
+            Modifier
+                .size(artSize)
+                .shadow(26.dp, radius)
+                .clip(radius)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (cover != null && File(cover).exists()) {
+                AsyncImage(
+                    model = File(cover),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    sound?.title?.trim()?.take(2)?.uppercase() ?: "♪",
+                    style = MaterialTheme.typography.displayLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0.62f to androidx.compose.ui.graphics.Color.Transparent,
+                            1f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.38f),
+                        ),
+                    ),
+            )
+            if (sound != null) {
+                IconButton(
+                    onClick = onChangeCover,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.70f), CircleShape),
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Change cover art",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerPage(
+    sound: Sound?,
+    state: com.sonata.core.media.connection.PlayerState,
+    player: PlayerConnection,
+    lyrics: Lyrics?,
+    lyricsLoading: Boolean,
+    favorite: Boolean,
+    abStart: Long?,
+    abEnd: Long?,
+    sleepMinutes: Int,
+    onOpenLyrics: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onOpenEq: () -> Unit,
+    onToggleSleep: () -> Unit,
+    onCycleSpeed: () -> Unit,
+    onCycleAb: () -> Unit,
+    onChangeCover: () -> Unit,
+) {
+    val spacing = LocalSpacing.current
+    val duration = state.durationMs.takeIf { it > 0 } ?: sound?.durationMs ?: 0L
+    var scrub by remember(sound?.id) { mutableStateOf<Float?>(null) }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val artSize = minOf(maxWidth * 0.94f, 400.dp)
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(6.dp))
+            ArtworkHero(sound = sound, artSize = artSize, onChangeCover = onChangeCover)
+
+            Spacer(Modifier.height(20.dp))
+
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    sound?.title ?: "Nothing playing",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    sound?.let(::metadataLine) ?: "Pick a sound from your library",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (sound != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        sound.tags
+                            .filter {
+                                it in listOf(
+                                    "verified", "full song", "clip only", "youtube",
+                                    "sped up", "slowed", "nightcore", "reverb", "bass boosted",
+                                ) || it.startsWith("match ")
+                            }
+                            .take(4)
+                            .forEach { tag -> TrackBadge(tag) }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                if (lyricsLoading) {
+                    "Finding the right lyrics…"
+                } else if (lyrics == null || lyrics.isEmpty) {
+                    "Lyrics not found · tap the lyrics button to search again"
+                } else {
+                    "Lyrics are ready"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            Slider(
+                value = scrub ?: if (duration > 0L) {
+                    (state.positionMs.toFloat() / duration).coerceIn(0f, 1f)
+                } else {
+                    0f
+                },
+                onValueChange = { scrub = it },
+                onValueChangeFinished = {
+                    scrub?.let { player.seekTo((it * duration).toLong()) }
+                    scrub = null
+                },
+                enabled = duration > 0L,
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                ),
+                modifier = Modifier.fillMaxWidth().height(34.dp),
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    formatDuration(scrub?.let { (it * duration).toLong() } ?: state.positionMs),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    formatDuration(duration),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(40.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.38f))
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                IconButton(onClick = { player.cycleRepeat() }) {
+                    Icon(
+                        if (state.repeatMode == Player.REPEAT_MODE_ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                        contentDescription = "Repeat mode",
+                        tint = if (state.repeatMode != Player.REPEAT_MODE_OFF) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                IconButton(onClick = { player.previous() }) {
+                    Icon(
+                        Icons.Filled.SkipPrevious,
+                        contentDescription = "Previous",
+                        modifier = Modifier.size(38.dp),
+                    )
+                }
+                FilledIconButton(
+                    onClick = { player.togglePlayPause() },
+                    modifier = Modifier.size(74.dp),
+                    shape = CircleShape,
+                ) {
+                    Icon(
+                        if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = if (state.isPlaying) "Pause" else "Play",
+                        modifier = Modifier.size(34.dp),
+                    )
+                }
+                IconButton(onClick = { player.next() }) {
+                    Icon(
+                        Icons.Filled.SkipNext,
+                        contentDescription = "Next",
+                        modifier = Modifier.size(38.dp),
+                    )
+                }
+                IconButton(onClick = onOpenEq) {
+                    Icon(Icons.Outlined.GraphicEq, contentDescription = "Equalizer")
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ActionPill(
+                    icon = Icons.Outlined.Lyrics,
+                    label = "Lyrics",
+                    active = false,
+                    onClick = onOpenLyrics,
+                )
+                ActionPill(
+                    icon = if (favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                    label = if (favorite) "Liked" else "Like",
+                    active = favorite,
+                    onClick = onToggleFavorite,
+                )
+                ActionPill(
+                    icon = Icons.Outlined.Timer,
+                    label = if (sleepMinutes == 0) "Sleep" else sleepMinutes.toString() + " min",
+                    active = sleepMinutes > 0,
+                    onClick = onToggleSleep,
+                )
+                ActionPill(
+                    icon = null,
+                    label = speedLabel(state.speed),
+                    active = abs(state.speed - 1f) > 0.01f,
+                    onClick = onCycleSpeed,
+                )
+                ActionPill(
+                    icon = null,
+                    label = when {
+                        abStart == null -> "A–B"
+                        abEnd == null -> "Set B"
+                        else -> "Clear A–B"
+                    },
+                    active = abStart != null,
+                    onClick = onCycleAb,
+                )
+            }
+
+            if (abStart != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (abEnd == null) {
+                        "A set at " + formatDuration(abStart ?: 0L) + " · play to the end of the phrase and tap Set B"
+                    } else {
+                        "Looping " + formatDuration(abStart ?: 0L) + " – " + formatDuration(abEnd ?: 0L)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+
+            Spacer(Modifier.height(spacing.xlDp))
         }
     }
 }

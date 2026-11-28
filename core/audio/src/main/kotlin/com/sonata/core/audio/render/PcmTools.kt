@@ -21,6 +21,9 @@ object PcmTools {
 
     const val SAMPLE_RATE = 44_100
 
+    /** Block size for effects that must not allocate a whole song twice. */
+    private const val BLOCK = 64 * 1024
+
     // ---------------------------------------------------------------- utility
 
     fun peak(pcm: ShortArray): Int {
@@ -43,12 +46,19 @@ object PcmTools {
     }
 
     /** Scales the whole buffer so its peak sits at [targetDb] (default -1 dBFS). */
-    fun normalize(pcm: ShortArray, targetDb: Double = -1.0): ShortArray {
+    fun normalize(pcm: ShortArray, targetDb: Double = -1.0): ShortArray =
+        normalizeInPlace(pcm.copyOf(), targetDb)
+
+    /** In-place normalize used by the full-song path to avoid a second full copy. */
+    fun normalizeInPlace(pcm: ShortArray, targetDb: Double = -1.0): ShortArray {
         val p = peak(pcm)
         if (p == 0) return pcm
         val target = 32767.0 * 10.0.pow(targetDb / 20.0)
         val gain = target / p
-        return ShortArray(pcm.size) { (pcm[it] * gain).roundToInt().coerceIn(-32768, 32767).toShort() }
+        for (i in pcm.indices) {
+            pcm[i] = (pcm[i] * gain).roundToInt().coerceIn(-32768, 32767).toShort()
+        }
+        return pcm
     }
 
     /** Applies a linear gain in dB, clipping safely. */
@@ -58,17 +68,20 @@ object PcmTools {
         return ShortArray(pcm.size) { (pcm[it] * g).roundToInt().coerceIn(-32768, 32767).toShort() }
     }
 
-    fun fade(pcm: ShortArray, fadeInMs: Int, fadeOutMs: Int, sampleRate: Int = SAMPLE_RATE): ShortArray {
+    fun fade(pcm: ShortArray, fadeInMs: Int, fadeOutMs: Int, sampleRate: Int = SAMPLE_RATE): ShortArray =
+        fadeInPlace(pcm.copyOf(), fadeInMs, fadeOutMs, sampleRate)
+
+    /** In-place fade pair used when the caller already owns the buffer. */
+    fun fadeInPlace(pcm: ShortArray, fadeInMs: Int, fadeOutMs: Int, sampleRate: Int = SAMPLE_RATE): ShortArray {
         if (pcm.isEmpty()) return pcm
-        val out = pcm.copyOf()
-        val inN = (sampleRate.toLong() * fadeInMs / 1000).toInt().coerceIn(0, out.size)
-        val outN = (sampleRate.toLong() * fadeOutMs / 1000).toInt().coerceIn(0, out.size)
-        for (i in 0 until inN) out[i] = (out[i] * (i.toDouble() / inN)).roundToInt().toShort()
+        val inN = (sampleRate.toLong() * fadeInMs / 1000).toInt().coerceIn(0, pcm.size)
+        val outN = (sampleRate.toLong() * fadeOutMs / 1000).toInt().coerceIn(0, pcm.size)
+        for (i in 0 until inN) pcm[i] = (pcm[i] * (i.toDouble() / inN)).roundToInt().toShort()
         for (i in 0 until outN) {
-            val idx = out.size - 1 - i
-            out[idx] = (out[idx] * (i.toDouble() / outN)).roundToInt().toShort()
+            val idx = pcm.size - 1 - i
+            pcm[idx] = (pcm[idx] * (i.toDouble() / outN)).roundToInt().toShort()
         }
-        return out
+        return pcm
     }
 
     // --------------------------------------------------------------- trimming
@@ -151,14 +164,23 @@ object PcmTools {
      * WSOLA time stretch: changes tempo while keeping pitch. [speed] > 1 is
      * faster and shorter, 0.8 is a slow-down.
      */
-    fun timeStretch(pcm: ShortArray, speed: Float, sampleRate: Int = SAMPLE_RATE): ShortArray {
+    fun timeStretch(
+        pcm: ShortArray,
+        speed: Float,
+        sampleRate: Int = SAMPLE_RATE,
+        onProgress: ((Float) -> Unit)? = null,
+    ): ShortArray {
         require(speed > 0f) { "speed must be positive" }
         if (abs(speed - 1f) < 0.001f || pcm.size < 4096) return pcm
         val frame = 2048
         val hopOut = frame / 2
         val outLen = (pcm.size / speed).roundToInt().coerceAtLeast(1)
         val window = hann(frame)
-        val acc = DoubleArray(outLen + frame)
+        // Overlap-add only needs two hops in memory. The old full-song path
+        // allocated a DoubleArray the length of the whole song, which could
+        // exceed the app heap on a five-minute recording.
+        val acc = DoubleArray(frame)
+        val out = ShortArray(outLen)
         var previousIn = 0
         var outPos = 0
         // Keep the analysis position tied to the requested tempo, but allow a
@@ -167,7 +189,9 @@ object PcmTools {
         // milliseconds is enough to lock a bass cycle without letting a click
         // slide onto the edge of the Hann window and disappear.
         val tolerance = (sampleRate * 0.004).toInt().coerceIn(64, 220)
-        val stride = 4
+        // 8-sample search granularity halves the cost of the expensive
+        // full-song alignment while still finding the best 4 ms phase.
+        val stride = 8
         while (outPos < outLen) {
             val target = (outPos * speed).roundToInt()
             if (target + frame > pcm.size) break
@@ -203,12 +227,22 @@ object PcmTools {
                     }
                 }
             }
-            val count = min(frame, outLen + frame - outPos)
+            val count = min(frame, outLen - outPos)
             for (i in 0 until count) {
-                acc[outPos + i] += sampleAt(pcm, bestSrc + i) * window[i]
+                acc[i] += sampleAt(pcm, bestSrc + i) * window[i]
             }
+            val emit = min(hopOut, outLen - outPos)
+            for (i in 0 until emit) {
+                out[outPos + i] = acc[i].roundToInt().coerceIn(-32768, 32767).toShort()
+            }
+            val keep = frame - hopOut
+            acc.copyInto(acc, 0, hopOut, frame)
+            acc.fill(0.0, keep, frame)
             previousIn = bestSrc
             outPos += hopOut
+            if (onProgress != null && (outPos / hopOut) % 32 == 0) {
+                onProgress(outPos.toFloat() / outLen.coerceAtLeast(1))
+            }
         }
 
         // The last few milliseconds can be shorter than one output hop; copy the
@@ -216,17 +250,19 @@ object PcmTools {
         if (outPos < outLen) {
             val srcStart = (outPos * speed).toInt().coerceIn(0, pcm.size - 1)
             for (i in outPos until outLen) {
-                acc[i] = pcm[(srcStart + i - outPos).coerceAtMost(pcm.size - 1)].toDouble()
+                out[i] = pcm[(srcStart + i - outPos).coerceAtMost(pcm.size - 1)]
             }
         }
-        val out = ShortArray(outLen) {
-            acc[it].roundToInt().coerceIn(-32768, 32767).toShort()
-        }
-        return fade(out, 3, 3, sampleRate)
+        onProgress?.invoke(1f)
+        return fadeInPlace(out, 3, 3, sampleRate)
     }
 
     /** Resampling pitch+tempo shift, the "nightcore / vinyl" character. */
-    fun resample(pcm: ShortArray, speed: Float): ShortArray {
+    fun resample(
+        pcm: ShortArray,
+        speed: Float,
+        onProgress: ((Float) -> Unit)? = null,
+    ): ShortArray {
         if (abs(speed - 1f) < 0.001f || pcm.isEmpty()) return pcm
         val outLen = (pcm.size / speed).toInt().coerceAtLeast(1)
         val out = ShortArray(outLen)
@@ -237,7 +273,9 @@ object PcmTools {
             val a = sampleAt(pcm, i0)
             val b = sampleAt(pcm, i0 + 1)
             out[i] = (a + (b - a) * frac).roundToInt().coerceIn(-32768, 32767).toShort()
+            if (onProgress != null && i % 65_536 == 0) onProgress(i.toFloat() / outLen)
         }
+        onProgress?.invoke(1f)
         return out
     }
 
@@ -268,41 +306,61 @@ object PcmTools {
         sampleRate: Int = SAMPLE_RATE,
         decay: Float = 0.78f,
         damping: Float = 0.25f,
+        onProgress: ((Float) -> Unit)? = null,
     ): ShortArray {
         if (mix <= 0f || pcm.isEmpty()) return pcm
         val scale = sampleRate / 44_100.0
         val combs = intArrayOf(1557, 1617, 1491, 1422).map { (it * scale).toInt().coerceAtLeast(1) }
         val allpasses = intArrayOf(225, 556).map { (it * scale).toInt().coerceAtLeast(1) }
-        val wet = DoubleArray(pcm.size)
-        for (delay in combs) {
-            val buf = DoubleArray(delay)
-            var idx = 0
-            var filter = 0.0
-            for (i in pcm.indices) {
-                val y = buf[idx]
-                filter = y * (1.0 - damping) + filter * damping
-                buf[idx] = pcm[i] / 32768.0 + filter * decay
-                idx = (idx + 1) % delay
-                wet[i] += y * 0.25
-            }
-        }
-        for (delay in allpasses) {
-            val buf = DoubleArray(delay)
-            var idx = 0
-            for (i in wet.indices) {
-                val buffered = buf[idx]
-                val y = -wet[i] + buffered
-                buf[idx] = wet[i] + buffered * 0.5
-                idx = (idx + 1) % delay
-                wet[i] = y
-            }
-        }
+        val combBufs = Array(combs.size) { DoubleArray(combs[it]) }
+        val combIdx = IntArray(combs.size)
+        val combFilter = DoubleArray(combs.size)
+        val allpassBufs = Array(allpasses.size) { DoubleArray(allpasses[it]) }
+        val allpassIdx = IntArray(allpasses.size)
+        val wet = DoubleArray(BLOCK)
+        val out = ShortArray(pcm.size)
         val wetLevel = mix.coerceIn(0f, 1f) * 1.6
         val dryLevel = 1.0 - mix.coerceIn(0f, 1f) * 0.55
-        return ShortArray(pcm.size) { i ->
-            ((pcm[i] / 32768.0) * dryLevel + wet[i] * wetLevel)
-                .times(32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
+        var start = 0
+        while (start < pcm.size) {
+            val count = min(BLOCK, pcm.size - start)
+            wet.fill(0.0, 0, count)
+            for (c in combs.indices) {
+                val delay = combs[c]
+                val buf = combBufs[c]
+                var idx = combIdx[c]
+                var filter = combFilter[c]
+                for (j in 0 until count) {
+                    val y = buf[idx]
+                    filter = y * (1.0 - damping) + filter * damping
+                    buf[idx] = pcm[start + j] / 32768.0 + filter * decay
+                    idx = (idx + 1) % delay
+                    wet[j] += y * 0.25
+                }
+                combIdx[c] = idx
+                combFilter[c] = filter
+            }
+            for (a in allpasses.indices) {
+                val delay = allpasses[a]
+                val buf = allpassBufs[a]
+                var idx = allpassIdx[a]
+                for (j in 0 until count) {
+                    val buffered = buf[idx]
+                    val y = -wet[j] + buffered
+                    buf[idx] = wet[j] + buffered * 0.5
+                    idx = (idx + 1) % delay
+                    wet[j] = y
+                }
+                allpassIdx[a] = idx
+            }
+            for (j in 0 until count) {
+                out[start + j] = ((pcm[start + j] / 32768.0) * dryLevel + wet[j] * wetLevel)
+                    .times(32767.0).roundToInt().coerceIn(-32768, 32767).toShort()
+            }
+            start += count
+            onProgress?.invoke(start.toFloat() / pcm.size)
         }
+        return out
     }
 
     // -------------------------------------------------------- effect estimate

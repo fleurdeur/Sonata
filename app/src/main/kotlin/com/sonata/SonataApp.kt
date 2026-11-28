@@ -5,7 +5,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,6 +40,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -215,12 +223,15 @@ fun SonataApp(
     val chromeVisible = route != "nowPlaying" && onboardingDone
 
     androidx.compose.runtime.CompositionLocalProvider(LocalHazeState provides hazeState) {
-        Box(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val expanded = maxWidth >= 600.dp
+            Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .statusBarsPadding()
-                    .hazeSource(hazeState),
+                    .hazeSource(hazeState)
+                    .padding(start = if (expanded && chromeVisible) 88.dp else 0.dp),
             ) {
                 AppNavHost(navController, onImport = { showImport = true })
             }
@@ -239,7 +250,7 @@ fun SonataApp(
                 )
             }
 
-            if (chromeVisible) {
+            if (chromeVisible && !expanded) {
                 Column(
                     Modifier
                         .align(Alignment.BottomCenter)
@@ -341,11 +352,57 @@ fun SonataApp(
                 }
             }
 
+            if (chromeVisible && expanded) {
+                NavigationRailShell(
+                    route = route,
+                    onNavigate = { tab ->
+                        navController.navigate(tab.route) {
+                            popUpTo(navController.graph.startDestinationId) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                    onImport = { showImport = true },
+                )
+                if (!miniPlayerHidden) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(start = 96.dp, end = 16.dp, bottom = 12.dp),
+                    ) {
+                        MiniPlayerBar(
+                            player = appViewModel.player,
+                            onOpenNowPlaying = {
+                                navController.navigate("nowPlaying") { launchSingleTop = true }
+                            },
+                            swipeToDismiss = settings.miniPlayerSwipeDismiss,
+                            onDismiss = {
+                                miniPlayerHidden = true
+                                scope.launch {
+                                    appViewModel.player.fadeOutAndPause()
+                                    val result = snackbarHostState.showSnackbar(
+                                        message = "Paused " + (playerState.current?.title ?: "playback"),
+                                        actionLabel = "Undo",
+                                        withDismissAction = true,
+                                    )
+                                    if (result == SnackbarResult.ActionPerformed) {
+                                        appViewModel.player.resumeAfterStop()
+                                        miniPlayerHidden = false
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+
             SnackbarHost(
                 hostState = snackbarHostState,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 156.dp, start = 16.dp, end = 16.dp),
+                    .padding(bottom = if (expanded) 120.dp else 156.dp, start = 16.dp, end = 16.dp),
             )
 
             if (!onboardingDone) {
@@ -356,6 +413,7 @@ fun SonataApp(
                     },
                 )
             }
+        }
         }
     }
 
@@ -371,6 +429,52 @@ fun SonataApp(
                     showImport = false
                     navController.navigate("library") { launchSingleTop = true }
                 },
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavigationRailShell(
+    route: String,
+    onNavigate: (Tab) -> Unit,
+    onImport: () -> Unit,
+) {
+    NavigationRail(
+        modifier = Modifier
+            .fillMaxHeight()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .width(88.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f),
+    ) {
+        Spacer(Modifier.height(12.dp))
+        FloatingActionButton(
+            onClick = onImport,
+            shape = RoundedCornerShape(18.dp),
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "Import a sound")
+        }
+        Spacer(Modifier.height(18.dp))
+        tabs.forEach { tab ->
+            val selected = route == tab.route
+            NavigationRailItem(
+                selected = selected,
+                onClick = { onNavigate(tab) },
+                icon = {
+                    Icon(
+                        if (selected) tab.iconSelected else tab.icon,
+                        contentDescription = null,
+                    )
+                },
+                label = { Text(tab.label) },
+                colors = NavigationRailItemDefaults.colors(
+                    indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                    selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                ),
             )
         }
     }
