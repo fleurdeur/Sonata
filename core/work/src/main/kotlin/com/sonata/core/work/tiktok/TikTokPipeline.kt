@@ -1,9 +1,9 @@
 package com.sonata.core.work.tiktok
 
 import android.content.Context
+import com.sonata.core.audio.render.AcousticMatcher
 import com.sonata.core.audio.render.EffectSpec
 import com.sonata.core.audio.render.PcmTools
-import com.sonata.core.audio.render.SpeedEstimator
 import com.sonata.core.audio.render.TrackRenderer
 import com.sonata.core.domain.model.ImportFailureKind
 import com.sonata.core.domain.model.ImportStage
@@ -26,7 +26,10 @@ import kotlin.math.abs
 import kotlin.math.log2
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.supervisorScope
 
 /** A finished TikTok import, ready to be inserted into the library. */
 data class TikTokTrack(
@@ -34,6 +37,10 @@ data class TikTokTrack(
     val title: String,
     val artist: String?,
     val pcm: ShortArray,
+    /** The untouched TikTok moment, rendered from the real clip. */
+    val clipPcm: ShortArray = pcm,
+    /** The verified full recording with the edit applied, when available. */
+    val fullSongPcm: ShortArray? = null,
     val tags: List<String>,
     val coverPath: String?,
     val fromFullSong: Boolean,
@@ -41,6 +48,8 @@ data class TikTokTrack(
     val matchConfidence: Float? = null,
     val matchOffsetMs: Long? = null,
     val diagnostics: String? = null,
+    val sourceLabel: String? = null,
+    val searchHint: String? = null,
     /** Source caches kept for a retry and deleted only after a successful save. */
     val cacheFiles: List<File> = emptyList(),
 )
@@ -117,7 +126,8 @@ class TikTokPipeline @Inject constructor(
         onStage(ImportStage.IDENTIFY_SONG, 0.54f, "Analysing the sound")
         val clipKey = AudioAnalysis.detectKey(clipPcm, PcmTools.SAMPLE_RATE)
         val tailRatio = PcmTools.reverbTailRatio(clipPcm)
-        val keywords = (video.musicTitle.orEmpty() + " " + video.description).lowercase()
+        val keywords = (video.musicTitle.orEmpty() + " " + video.description + " " +
+            video.effectHints.joinToString(" ")).lowercase()
         val clipMs = clipPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
 
         var sourceLabel: String? = null
@@ -127,6 +137,8 @@ class TikTokPipeline @Inject constructor(
         var matchOffsetMs: Long? = null
         var diagnostics: String? = null
         var verified = false
+        var matched: AcousticMatcher.Match? = null
+        var searchHint: String? = null
 
         // TikTok's music stream is the same recording by definition; use it
         // when it is genuinely full length, without a risky web search.
@@ -135,95 +147,127 @@ class TikTokPipeline @Inject constructor(
             onStage(ImportStage.EXTRACT_AUDIO, 0.62f, "Checking TikTok's full sound")
             val candidatePcm = decodeOrNull(tiktokFullFile)
             if (candidatePcm != null && isFullLength(candidatePcm, clipMs)) {
-                fullPcm = candidatePcm
-                sourceLabel = "tiktok"
-                matchConfidence = 1f
-                verified = true
+                val proof = runCatching { AcousticMatcher.match(clipPcm, candidatePcm) }.getOrNull()
+                if (proof?.verified == true) {
+                    fullPcm = candidatePcm
+                    sourceLabel = "tiktok"
+                    matched = proof
+                    verified = true
+                    matchConfidence = proof.score
+                    matchOffsetMs = proof.offsetMs
+                    diagnostics = "TikTok supplied the full sound; audio matched at " +
+                        (proof.score * 100).roundToInt() + "%."
+                } else {
+                    diagnostics = "TikTok's full sound did not pass audio proof; kept the real clip."
+                }
             } else if (candidatePcm != null) {
                 diagnostics = "TikTok's music stream was only the edit; searched for the full song."
             }
         }
 
         if (fullPcm == null) {
-            onStage(ImportStage.IDENTIFY_SONG, 0.66f, "Finding the full song")
-            val query = video.fullTrackQuery ?: video.displayTitle
-            val candidate = runCatching {
-                fullTrackFinder.find(query, video.displayArtist, clipMs)
-            }.getOrNull()
-            if (candidate != null) {
-                onStage(ImportStage.FETCH_FULL_TRACK, 0.70f, "Downloading the full song")
-                val stream = runCatching {
-                    ioRetry("YouTube stream") { extractor.resolveStream(candidate.videoId) }
-                }.getOrNull()
-                when (stream) {
-                    is ResolveOutcome.Ok -> {
-                        val file = audioStore.cacheFile("youtube_" + candidate.videoId + ".m4a")
-                        cacheFiles += file
-                        val downloaded = runCatching {
-                            if (!isUsableMedia(file)) {
-                                ioRetry("YouTube audio") {
-                                    downloader.download(
-                                        url = stream.url,
-                                        destination = file,
-                                        onProgress = { fraction ->
-                                            onStage(
-                                                ImportStage.FETCH_FULL_TRACK,
-                                                0.70f + fraction * 0.10f,
-                                                "Downloading the full song",
-                                            )
-                                        },
-                                        userAgent = stream.client.userAgent,
-                                        referer = "https://www.youtube.com/",
-                                    )
-                                }
-                            }
-                            file
-                        }.getOrNull()
-                        if (downloaded != null) {
-                            onStage(ImportStage.EXTRACT_AUDIO, 0.81f, "Matching the full recording")
-                            val candidatePcm = decodeOrNull(downloaded)
-                            if (candidatePcm != null && isFullLength(candidatePcm, clipMs)) {
-                                val estimate = SpeedEstimator.estimate(clipPcm, candidatePcm, PcmTools.SAMPLE_RATE)
-                                val spectral = AudioAnalysis.spectralSimilarity(clipPcm, candidatePcm)
-                                val acoustic = estimate.confidence.toFloat()
-                                val metadata = candidate.score
-                                val confidence = (
-                                    0.55f * acoustic +
-                                        0.30f * metadata +
-                                        0.15f * spectral
-                                    ).coerceIn(0f, 0.99f)
-                                val accepted = acoustic >= MIN_ACOUSTIC_CONFIDENCE ||
-                                    (metadata >= 0.72f && spectral >= MIN_SPECTRAL_SIMILARITY)
-                                if (accepted) {
-                                    fullPcm = candidatePcm
-                                    sourceLabel = "youtube"
-                                    sourceCandidate = candidate
-                                    matchConfidence = confidence
-                                    matchOffsetMs = estimate.offsetMs
-                                    verified = true
-                                    diagnostics = "Verified with acoustic " +
-                                        (acoustic * 100).roundToInt() + "%, metadata " +
-                                        (metadata * 100).roundToInt() + "%, spectrum " +
-                                        (spectral * 100).roundToInt() + "%."
-                                } else {
-                                    diagnostics = "Rejected a possible full-song match: acoustic " +
-                                        (acoustic * 100).roundToInt() + "%, metadata " +
-                                        (metadata * 100).roundToInt() + "%, spectrum " +
-                                        (spectral * 100).roundToInt() +
-                                        "%. Kept the real clip instead."
-                                }
-                            } else {
-                                diagnostics = "The full-song download was incomplete or too short; kept the real clip."
+            val hints = video.fullTrackHints.take(3)
+            if (hints.isEmpty()) {
+                diagnostics = "No song name on this sound and no song hint in the caption; kept the real clip."
+            } else {
+                onStage(ImportStage.IDENTIFY_SONG, 0.66f, "Finding the full song")
+                // Search every explicit hint at once; one timed-out query must
+                // not hide the candidate another hint would have found.
+                val pages = supervisorScope {
+                    hints.map { hint ->
+                        async {
+                            runCatching {
+                                fullTrackFinder.findCandidates(hint.title, hint.artist, clipMs, 4)
+                            }.getOrDefault(emptyList())
+                        }
+                    }.awaitAll()
+                }
+                val found = linkedMapOf<String, FullTrackCandidate>()
+                pages.flatten().forEach { candidate -> found.putIfAbsent(candidate.videoId, candidate) }
+                searchHint = hints.firstOrNull()?.let {
+                    listOfNotNull(it.title, it.artist).joinToString(" ")
+                }
+                val candidates = found.values.sortedByDescending { it.score }.take(3)
+                var rejection: String? = null
+                for ((index, candidate) in candidates.withIndex()) {
+                    onStage(
+                        ImportStage.FETCH_FULL_TRACK,
+                        0.70f,
+                        "Downloading candidate " + (index + 1) + " of " + candidates.size,
+                    )
+                    val stream = runCatching {
+                        ioRetry("YouTube stream") { extractor.resolveStream(candidate.videoId) }
+                    }.getOrNull()
+                    if (stream !is ResolveOutcome.Ok) {
+                        rejection = when (stream) {
+                            is ResolveOutcome.AgeRestricted -> "The top candidate is age-restricted."
+                            is ResolveOutcome.RegionBlocked -> "The top candidate is region-locked."
+                            is ResolveOutcome.Unavailable -> "The top candidate has no playable stream."
+                            else -> "The top candidate could not be resolved."
+                        }
+                        continue
+                    }
+                    val file = audioStore.cacheFile("youtube_" + candidate.videoId + ".m4a")
+                    cacheFiles += file
+                    val downloaded = runCatching {
+                        if (!isUsableMedia(file)) {
+                            ioRetry("YouTube audio") {
+                                downloader.download(
+                                    url = stream.url,
+                                    destination = file,
+                                    onProgress = { fraction ->
+                                        onStage(
+                                            ImportStage.FETCH_FULL_TRACK,
+                                            0.70f + fraction * 0.08f,
+                                            "Downloading candidate " + (index + 1) +
+                                                " of " + candidates.size,
+                                        )
+                                    },
+                                    userAgent = stream.client.userAgent,
+                                    referer = "https://www.youtube.com/",
+                                )
                             }
                         }
+                        file
+                    }.getOrNull()
+                    if (downloaded == null) {
+                        rejection = "Candidate " + (index + 1) + " did not download completely."
+                        continue
                     }
-                    is ResolveOutcome.AgeRestricted ->
-                        diagnostics = "The full song on YouTube is age-restricted; kept the real clip."
-                    is ResolveOutcome.RegionBlocked ->
-                        diagnostics = "The full song is not available in this region; kept the real clip."
-                    is ResolveOutcome.Unavailable ->
-                        diagnostics = "No playable full-song stream was available; kept the real clip."
-                    null -> diagnostics = "Could not resolve the full-song stream; kept the real clip."
+                    onStage(ImportStage.EXTRACT_AUDIO, 0.81f, "Matching candidate " + (index + 1))
+                    val candidatePcm = decodeOrNull(downloaded)
+                    if (candidatePcm == null || !isFullLength(candidatePcm, clipMs)) {
+                        rejection = "Candidate " + (index + 1) + " was not a full-length recording."
+                        cacheFiles.remove(file)
+                        file.delete()
+                        continue
+                    }
+                    val proof = runCatching {
+                        AcousticMatcher.match(clipPcm, candidatePcm, PcmTools.SAMPLE_RATE)
+                    }.getOrNull()
+                    if (proof?.verified == true) {
+                        fullPcm = candidatePcm
+                        sourceLabel = "youtube"
+                        sourceCandidate = candidate
+                        matched = proof
+                        matchConfidence = proof.score
+                        matchOffsetMs = proof.offsetMs
+                        verified = true
+                        diagnostics = "Verified by audio: spectral " +
+                            (proof.score * 100).roundToInt() + "% confidence, " +
+                            (proof.chromaScore * 100).roundToInt() + "% chroma, " +
+                            proof.speed + "x, offset " + proof.offsetMs + " ms."
+                        break
+                    } else {
+                        rejection = "Candidate " + (index + 1) + " had no audio proof (score " +
+                            ((proof?.score ?: 0f) * 100).roundToInt() + "%)."
+                        cacheFiles.remove(file)
+                        file.delete()
+                    }
+                }
+                if (!verified) {
+                    diagnostics = (rejection ?: "No candidate had audio proof.") +
+                        " Kept the real clip instead of faking a full song."
                 }
             }
         }
@@ -237,14 +281,21 @@ class TikTokPipeline @Inject constructor(
 
         onStage(ImportStage.ALIGN_EDIT, 0.86f, "Matching the edit's effects")
         val effect = if (fullPcm != null) {
-            detectEffect(clipKey, clipPcm, fullPcm, tailRatio, keywords)
+            detectEffect(clipKey, clipPcm, fullPcm, tailRatio, keywords, matched)
         } else {
             EffectSpec()
         }
 
         val fromFull = fullPcm != null && verified
         onStage(ImportStage.ALIGN_EDIT, 0.89f, "Rendering the track")
-        val rendered = if (fullPcm != null && fromFull) {
+        val clipRendered = TrackRenderer.render(
+            source = clipPcm,
+            spec = EffectSpec(),
+            targetDurationMs = null,
+            loopClip = false,
+            fadeOutMs = 400,
+        )
+        val fullRendered = if (fullPcm != null && fromFull) {
             TrackRenderer.render(
                 source = fullPcm,
                 spec = effect,
@@ -252,14 +303,9 @@ class TikTokPipeline @Inject constructor(
                 loopClip = false,
             )
         } else {
-            TrackRenderer.render(
-                source = trimSilence(clipPcm),
-                spec = effect,
-                targetDurationMs = null,
-                loopClip = false,
-                fadeOutMs = 600,
-            )
+            null
         }
+        val rendered = fullRendered ?: clipRendered
 
         val artist = when {
             sourceLabel == "youtube" -> sourceCandidate?.artist ?: video.displayArtist
@@ -275,6 +321,8 @@ class TikTokPipeline @Inject constructor(
             title = title,
             artist = artist,
             pcm = rendered,
+            clipPcm = clipRendered,
+            fullSongPcm = fullRendered,
             tags = buildTags(video, effect, fromFull, sourceLabel, verified, matchConfidence),
             coverPath = coverPath,
             fromFullSong = fromFull,
@@ -282,6 +330,8 @@ class TikTokPipeline @Inject constructor(
             matchConfidence = matchConfidence,
             matchOffsetMs = matchOffsetMs,
             diagnostics = diagnostics,
+            sourceLabel = sourceLabel,
+            searchHint = searchHint,
             cacheFiles = cacheFiles,
         )
     }
@@ -354,12 +404,18 @@ class TikTokPipeline @Inject constructor(
         fullPcm: ShortArray,
         tailRatio: Double,
         keywords: String,
+        matched: AcousticMatcher.Match?,
     ): EffectSpec {
-        val estimate = SpeedEstimator.estimate(clipPcm, fullPcm, PcmTools.SAMPLE_RATE)
-        val speed = estimate.speed
-
-        val analysisWindow = if (fullPcm.size > 90 * PcmTools.SAMPLE_RATE) {
-            fullPcm.copyOfRange(0, 90 * PcmTools.SAMPLE_RATE)
+        // The matcher already measured speed and pitch against the correct part
+        // of the song. Do not run a second, differently-windowed estimate.
+        val speed = matched?.speed?.takeIf { matched.verified } ?: 1f
+        val sourceOffset = ((matched?.offsetMs ?: 0L).toFloat() * speed).coerceAtLeast(0f).toLong()
+        val start = (sourceOffset - 15_000L).coerceAtLeast(0L)
+        val end = (start + 60_000L).coerceAtMost(fullPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE)
+        val from = (start * PcmTools.SAMPLE_RATE / 1000).toInt().coerceIn(0, fullPcm.size)
+        val to = (end * PcmTools.SAMPLE_RATE / 1000).toInt().coerceIn(from, fullPcm.size)
+        val analysisWindow = if (to - from >= PcmTools.SAMPLE_RATE * 4) {
+            fullPcm.copyOfRange(from, to)
         } else {
             fullPcm
         }
@@ -367,10 +423,15 @@ class TikTokPipeline @Inject constructor(
         val semitones = PcmTools.semitoneDelta(fullKey, clipKey)
         val expected = 12f * log2(speed)
         val saysNightcore = keywords.contains("nightcore")
+        val measuredPitch = matched?.pitchSemitones ?: 0
+        val pitchAgrees = abs(measuredPitch.toFloat() - expected) <= 1.5f && abs(measuredPitch) >= 1
+        val saysSpedUp = keywords.contains("sped up") || keywords.contains("speed up")
         val coupled = when {
             speed == 1f -> false
             saysNightcore -> true
-            abs(semitones - expected) <= 1.2f && abs(semitones) >= 1 -> true
+            pitchAgrees -> true
+            saysSpedUp && speed > 1.08f -> true
+            abs(semitones.toFloat() - expected) <= 1.2f && abs(semitones) >= 1 -> true
             else -> false
         }
 
@@ -442,7 +503,5 @@ class TikTokPipeline @Inject constructor(
 
     private companion object {
         const val MAX_IO_ATTEMPTS = 3
-        const val MIN_ACOUSTIC_CONFIDENCE = 0.30f
-        const val MIN_SPECTRAL_SIMILARITY = 0.50f
     }
 }

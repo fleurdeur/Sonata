@@ -161,10 +161,12 @@ object PcmTools {
         val acc = DoubleArray(outLen + frame)
         var previousIn = 0
         var outPos = 0
-        // Keep the analysis position tied to the requested tempo. Searching a
-        // full hop around the previous frame lets the matcher cancel the speed
-        // change entirely; a small phase window keeps the tempo exact.
-        val tolerance = (sampleRate * 0.001).toInt().coerceIn(16, 48)
+        // Keep the analysis position tied to the requested tempo, but allow a
+        // real phase search. One millisecond is shorter than a low bass period,
+        // so the old window clicked and smeared on kick-heavy edits. Four
+        // milliseconds is enough to lock a bass cycle without letting a click
+        // slide onto the edge of the Hann window and disappear.
+        val tolerance = (sampleRate * 0.004).toInt().coerceIn(64, 220)
         val stride = 4
         while (outPos < outLen) {
             val target = (outPos * speed).roundToInt()
@@ -175,25 +177,30 @@ object PcmTools {
                 // Pick the nearby input offset that continues that waveform.
                 val natural = previousIn + hopOut
                 var best = Double.MAX_VALUE
-                var shift = -tolerance
-                while (shift <= tolerance) {
-                    val candidate = target + shift
-                    if (candidate >= 0 && candidate + frame <= pcm.size &&
-                        natural + hopOut <= pcm.size
-                    ) {
-                        var cost = 0.0
-                        var i = 0
-                        while (i < hopOut) {
-                            val d = pcm[candidate + i].toDouble() - pcm[natural + i].toDouble()
-                            cost += d * d
-                            i += stride
-                        }
-                        if (cost < best) {
-                            best = cost
-                            bestSrc = candidate
+                // Search outwards from the natural target and keep zero shift on
+                // ties. A left-to-right scan would prefer a far-away silent
+                // window over the truly aligned one.
+                val steps = tolerance / stride
+                for (step in 0..steps) {
+                    val shifts = if (step == 0) intArrayOf(0) else intArrayOf(-step * stride, step * stride)
+                    for (shift in shifts) {
+                        val candidate = target + shift
+                        if (candidate >= 0 && candidate + frame <= pcm.size &&
+                            natural + hopOut <= pcm.size
+                        ) {
+                            var cost = 0.0
+                            var i = 0
+                            while (i < hopOut) {
+                                val d = pcm[candidate + i].toDouble() - pcm[natural + i].toDouble()
+                                cost += d * d
+                                i += stride
+                            }
+                            if (cost < best) {
+                                best = cost
+                                bestSrc = candidate
+                            }
                         }
                     }
-                    shift += stride
                 }
             }
             val count = min(frame, outLen + frame - outPos)

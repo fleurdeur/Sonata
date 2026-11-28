@@ -56,6 +56,12 @@ interface SoundDao {
     @Query("UPDATE sounds SET title = :title, artist = :artist, album = :album WHERE id = :id")
     suspend fun updateMetadata(id: Long, title: String, artist: String?, album: String?)
 
+    @Query("UPDATE sounds SET filePath = :filePath, activeVariant = :variant WHERE id = :id")
+    suspend fun updateVariant(id: Long, filePath: String, variant: String)
+
+    @Query("UPDATE sounds SET coverPath = :coverPath WHERE id = :id")
+    suspend fun updateCover(id: Long, coverPath: String?)
+
     @Query("SELECT DISTINCT tags FROM sounds WHERE tags != ''")
     suspend fun allTags(): List<String>
 

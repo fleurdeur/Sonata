@@ -56,11 +56,14 @@ import com.sonata.core.designsystem.Dimensions
 import com.sonata.core.designsystem.LocalSpacing
 import com.sonata.core.designsystem.components.ScreenHeader
 import com.sonata.core.designsystem.components.SectionTitle
+import com.sonata.core.domain.model.Cue
+import com.sonata.core.domain.model.CueKind
 import com.sonata.core.domain.model.Lyrics
 import com.sonata.core.domain.model.MusicalKey
 import com.sonata.core.domain.model.Preset
 import com.sonata.core.domain.model.PresetCategory
 import com.sonata.core.domain.model.Sound
+import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.domain.repository.PresetRepository
 import com.sonata.core.domain.repository.Settings
@@ -87,6 +90,7 @@ class SettingsViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
     private val presetRepository: PresetRepository,
     private val lyricsRepository: LyricsRepository,
+    private val cueRepository: CueRepository,
     @ApplicationContext private val context: Context,
     val dsp: DspManager,
 ) : ViewModel() {
@@ -152,7 +156,7 @@ class SettingsViewModel @Inject constructor(
             withContext(Dispatchers.IO) { writeBackup(uri) }
         }
         _backupNotice.value = result.fold(
-            onSuccess = { "Backup saved · " + it + " songs and their lyrics" },
+            onSuccess = { "Backup saved · " + it + " songs, lyrics and cues" },
             onFailure = { "Could not save the backup: " + (it.message ?: "write failed") },
         )
     }
@@ -215,6 +219,23 @@ class SettingsViewModel @Inject constructor(
                         .put("offsetMs", lyrics.offsetMs),
                 )
             }
+            val cues = cueRepository.list(sound.id)
+            if (cues.isNotEmpty()) {
+                row.put(
+                    "cues",
+                    JSONArray().apply {
+                        cues.forEach { cue ->
+                            put(
+                                JSONObject()
+                                    .put("positionMs", cue.positionMs)
+                                    .put("endMs", cue.endMs ?: JSONObject.NULL)
+                                    .put("label", cue.label)
+                                    .put("kind", cue.kind.name),
+                            )
+                        }
+                    },
+                )
+            }
             array.put(row)
         }
         root.put("sounds", array)
@@ -269,6 +290,21 @@ class SettingsViewModel @Inject constructor(
                         rawLrc = raw,
                     ),
                 )
+            }
+            row.optJSONArray("cues")?.let { cuesArray ->
+                val cues = (0 until cuesArray.length()).mapNotNull { index ->
+                    val cue = cuesArray.optJSONObject(index) ?: return@mapNotNull null
+                    Cue(
+                        soundId = sound.id,
+                        positionMs = cue.optLong("positionMs", 0L).coerceAtLeast(0L),
+                        endMs = if (cue.isNull("endMs")) null else cue.optLong("endMs"),
+                        label = cue.optString("label").takeIf { it.isNotBlank() } ?: "Cue",
+                        kind = runCatching { CueKind.valueOf(cue.optString("kind")) }
+                            .getOrDefault(CueKind.MEMORY),
+                        createdAt = System.currentTimeMillis(),
+                    )
+                }
+                cueRepository.replaceAll(sound.id, cues)
             }
             restored++
         }
@@ -355,6 +391,16 @@ fun SettingsScreen(
                 subtitle = "Use the wallpaper palette when the system supports it",
                 checked = settings.dynamicColor,
                 onCheckedChange = { value -> viewModel.update { it.copy(dynamicColor = value) } },
+            )
+        }
+        item {
+            SettingToggle(
+                title = "Swipe down to dismiss the mini player",
+                subtitle = "Fades the sound out; an Undo snackbar brings it back",
+                checked = settings.miniPlayerSwipeDismiss,
+                onCheckedChange = { value ->
+                    viewModel.update { it.copy(miniPlayerSwipeDismiss = value) }
+                },
             )
         }
         item {

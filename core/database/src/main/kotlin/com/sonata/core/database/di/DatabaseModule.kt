@@ -17,7 +17,11 @@ object DatabaseModule {
     @Provides @Singleton
     fun provideDatabase(@ApplicationContext context: Context): SonataDatabase =
         Room.databaseBuilder(context, SonataDatabase::class.java, SonataDatabase.NAME)
-            .addMigrations(SonataDatabase.MIGRATION_1_2, SonataDatabase.MIGRATION_2_3)
+            .addMigrations(
+                SonataDatabase.MIGRATION_1_2,
+                SonataDatabase.MIGRATION_2_3,
+                SonataDatabase.MIGRATION_3_4,
+            )
             // No destructive fallback: a missing migration must never wipe a library.
             .build()
 
@@ -27,4 +31,5 @@ object DatabaseModule {
     @Provides fun presetDao(db: SonataDatabase) = db.presetDao()
     @Provides fun importJobDao(db: SonataDatabase) = db.importJobDao()
     @Provides fun lyricsDao(db: SonataDatabase) = db.lyricsDao()
+    @Provides fun cueDao(db: SonataDatabase) = db.cueDao()
 }

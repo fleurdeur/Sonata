@@ -14,6 +14,8 @@ import com.sonata.core.domain.model.ImportFailureKind
 import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.domain.model.MusicalKey
+import com.sonata.core.domain.model.CueKind
+import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.ImportRepository
 import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.extractor.provider.LinkResolverRegistry
@@ -55,6 +57,7 @@ class ImportWorker @AssistedInject constructor(
     private val downloader: MediaDownloader,
     private val tiktokPipeline: TikTokPipeline,
     private val lyricsRepository: LyricsRepository,
+    private val cueRepository: CueRepository,
     @IoDispatcher private val io: CoroutineDispatcher,
 ) : CoroutineWorker(appContext, params) {
 
@@ -167,22 +170,59 @@ class ImportWorker @AssistedInject constructor(
             track.fromFullSong,
             track.matchConfidence,
         )
-        val file = audioStore.newSoundFile("m4a")
-        val written = PcmFileWriter.write(track.pcm, PcmTools.SAMPLE_RATE, file)
+        val clipFile = audioStore.newSoundFile("m4a")
+        val clipWritten = PcmFileWriter.write(track.clipPcm, PcmTools.SAMPLE_RATE, clipFile)
+        val fullPcm = track.fullSongPcm
+        var fullWritten: File? = null
+        if (fullPcm != null && fullPcm.isNotEmpty()) {
+            val fullFile = audioStore.newSoundFile("m4a")
+            fullWritten = runCatching {
+                PcmFileWriter.write(fullPcm, PcmTools.SAMPLE_RATE, fullFile)
+            }.onFailure {
+                // Keep the proven clip; a failed full encode must not lose the import.
+                fullFile.delete()
+            }.getOrNull()
+        }
+        // A failed full-song encode must degrade honestly to the real clip,
+        // not keep "verified"/"full song" tags on a three-second file.
+        val fullReady = fullWritten != null
+        val tags = if (fullReady) {
+            track.tags
+        } else {
+            track.tags.filterNot { it == "full song" || it == "verified" || it.startsWith("match ") } +
+                "clip only"
+        }
         val stored = persist(
-            pcm = track.pcm,
-            file = written,
+            pcm = if (fullReady) fullPcm ?: track.clipPcm else track.clipPcm,
+            file = fullWritten ?: clipWritten,
             title = track.title,
             artist = track.artist,
             source = "TIKTOK",
             coverPath = track.coverPath,
-            tags = track.tags,
-            speed = track.effect.speed,
-            fetchLyrics = track.fromFullSong,
-            verified = track.fromFullSong,
-            confidence = track.matchConfidence,
+            tags = tags,
             progress = progress,
+            speed = if (fullReady) track.effect.speed else 1f,
+            fetchLyrics = track.fromFullSong && fullReady,
+            verified = track.fromFullSong && fullReady,
+            confidence = if (fullReady) track.matchConfidence else null,
+            clipFile = clipWritten,
+            fullSongFile = fullWritten,
+            matchOffsetMs = if (fullReady) track.matchOffsetMs ?: 0L else 0L,
+            tiktokMusicId = track.video.musicId,
+            tiktokSoundName = track.video.musicTitle,
+            tiktokCaption = track.video.description,
         )
+        if (track.fromFullSong && fullReady && (track.matchOffsetMs ?: 0L) > 0L) {
+            // A verified offset is the TikTok moment; save it as a real cue.
+            runCatching {
+                cueRepository.ensure(
+                    soundId = stored.soundId,
+                    positionMs = track.matchOffsetMs ?: 0L,
+                    label = "TikTok moment",
+                    kind = CueKind.MEMORY,
+                )
+            }
+        }
         // The import is safely in the library; only now discard source caches.
         track.cacheFiles.forEach { runCatching { it.delete() } }
         return stored
@@ -385,12 +425,19 @@ class ImportWorker @AssistedInject constructor(
         fetchLyrics: Boolean = true,
         verified: Boolean? = null,
         confidence: Float? = null,
+        clipFile: File? = null,
+        fullSongFile: File? = null,
+        matchOffsetMs: Long = 0L,
+        tiktokMusicId: String? = null,
+        tiktokSoundName: String? = null,
+        tiktokCaption: String? = null,
     ): Stored {
         progress(ImportStage.PERSIST_LIBRARY, 0.94f, title, null, null, null, verified, confidence)
         val fingerprint = AudioAnalysis.fingerprint(pcm, PcmTools.SAMPLE_RATE)
         val existing = soundDao.findByFingerprint(fingerprint)
         if (existing != null) {
-            file.delete()
+            // Never leave a half-orphaned variant behind on a duplicate.
+            setOfNotNull(file, clipFile, fullSongFile).forEach { it.delete() }
             return Stored(existing.id, existing.title, duplicate = true)
         }
         val durationMs = pcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE
@@ -403,7 +450,14 @@ class ImportWorker @AssistedInject constructor(
                 sampleRate = PcmTools.SAMPLE_RATE,
                 channels = 1,
                 bpm = AudioAnalysis.detectBpm(pcm, PcmTools.SAMPLE_RATE),
-                key = MusicalKey.fromPitchClass(AudioAnalysis.detectKey(pcm, PcmTools.SAMPLE_RATE)).name,
+                key = AudioAnalysis.detectKeyEstimate(pcm, PcmTools.SAMPLE_RATE).let {
+                    // Only claim a minor mode when the profile is actually
+                    // distinguishable from the relative major.
+                    MusicalKey.fromPitchClass(
+                        it.pitchClass,
+                        minor = it.minor && it.confidence >= 0.04f,
+                    ).name
+                },
                 loudnessLufs = AudioAnalysis.loudnessLufs(pcm),
                 addedAt = System.currentTimeMillis(),
                 filePath = file.absolutePath,
@@ -412,6 +466,15 @@ class ImportWorker @AssistedInject constructor(
                 tags = tags.joinToString("|"),
                 fingerprint = fingerprint,
                 importStatus = "READY",
+                clipFilePath = clipFile?.absolutePath,
+                fullSongFilePath = fullSongFile?.absolutePath,
+                matchOffsetMs = matchOffsetMs,
+                matchConfidence = confidence,
+                effectSpeed = speed,
+                activeVariant = if (fullSongFile != null || source != "TIKTOK") "FULL" else "CLIP",
+                tiktokMusicId = tiktokMusicId,
+                tiktokSoundName = tiktokSoundName,
+                tiktokCaption = tiktokCaption,
             ),
         )
         val (silenceStart, silenceEnd) = runCatching {

@@ -14,6 +14,7 @@ data class Settings(
     val blurStrength: Int = 16,
     val animationSpeed: Float = 1f,
     val hapticIntensity: Float = 1f,
+    val miniPlayerSwipeDismiss: Boolean = true,
     val gapless: Boolean = true,
     val loudnessNormalization: Boolean = true,
     val pauseOnDisconnect: Boolean = true,

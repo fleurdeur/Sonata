@@ -14,6 +14,9 @@ import kotlin.math.sqrt
  */
 object AudioAnalysis {
 
+    private val MAJOR_PROFILE = doubleArrayOf(6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+    private val MINOR_PROFILE = doubleArrayOf(6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+
     /** Average-hash style fingerprint over downsampled spectral chunks. */
     fun fingerprint(pcm: ShortArray, sampleRate: Int): String {
         val chunks = 64
@@ -81,115 +84,144 @@ object AudioAnalysis {
         return folded.roundToInt()
     }
 
-    /** Musical key via chroma aggregation against major/minor profiles. */
+    /** Key estimate with mode and a simple confidence margin. */
+    data class KeyEstimate(
+        val pitchClass: Int,
+        val minor: Boolean,
+        val confidence: Float,
+    )
+
+    /**
+     * Musical key via FFT chroma against Krumhansl major/minor profiles.
+     * Returns the tonic pitch class only (major interpretation) so older
+     * pitch-shift callers keep their simple semitone arithmetic.
+     */
     fun detectKey(pcm: ShortArray, sampleRate: Int): Int {
-        // Downsample to ~8 kHz and DFT a few windows; aggregate chroma.
-        val chroma = DoubleArray(12)
-        val step = (sampleRate / 8000).coerceAtLeast(1)
-        val effectiveRate = sampleRate / step
-        val windowSize = 4096
-        val windows = ((pcm.size / step - windowSize) / (windowSize / 2)).coerceAtLeast(1).coerceAtMost(16)
-        val twoPi = 2.0 * Math.PI
-        for (w in 0 until windows) {
-            val base = w * windowSize / 2
-            val window = DoubleArray(windowSize) { i ->
-                (pcm[(base + i) * step] / 32768.0) *
-                    (0.5 - 0.5 * cos(twoPi * i / windowSize)) // Hann
-            }
-            for (bin in 1 until windowSize / 2) {
-                var re = 0.0
-                var im = 0.0
-                val freq = bin.toDouble() * effectiveRate / windowSize
-                if (freq < 65 || freq > 2100) continue
-                for (i in 0 until windowSize) {
-                    val angle = twoPi * bin * i / windowSize
-                    re += window[i] * cos(angle)
-                    im -= window[i] * sinApprox(angle)
-                }
-                val magnitude = sqrt(re * re + im * im)
-                if (magnitude <= 0) continue
-                val midi = 69 + 12 * kotlin.math.ln(freq / 440.0) / Math.log(2.0)
-                val pitchClass = ((midi.roundToInt() % 12) + 12) % 12
-                chroma[pitchClass] += magnitude
-            }
-        }
-        val total = chroma.sum()
-        if (total <= 0) return 0
-        val normalized = chroma.map { it / total }
-        // Krumhansl major profile, rotated over the 12 pitch classes.
-        val major = doubleArrayOf(6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+        val chroma = chromaProfile(pcm, sampleRate)
+        if (chroma == null) return 0
         var best = 0
         var bestScore = -1.0
         for (root in 0 until 12) {
-            var score = 0.0
-            for (i in 0 until 12) score += normalized[(root + i) % 12] * major[i]
+            val score = profileScore(chroma, root, MAJOR_PROFILE)
             if (score > bestScore) {
                 bestScore = score
                 best = root
             }
         }
-        return best // index into MusicalKey values
+        return best
     }
 
-    private fun sinApprox(x: Double): Double = kotlin.math.sin(x)
-
-    /**
-     * Coarse long-term spectral similarity, independent of playhead offset.
-     * This is a second acoustic signal alongside onset correlation: the same
-     * master keeps a similar log-band energy shape even when a clip is only a
-     * few seconds of it. Different songs with similar titles normally do not.
-     */
-    fun spectralSimilarity(a: ShortArray, b: ShortArray, sampleRate: Int = 44_100): Float {
-        val pa = spectralProfile(a, sampleRate)
-        val pb = spectralProfile(b, sampleRate)
-        var dot = 0.0
-        var na = 0.0
-        var nb = 0.0
-        for (i in pa.indices) {
-            dot += pa[i] * pb[i]
-            na += pa[i] * pa[i]
-            nb += pb[i] * pb[i]
-        }
-        if (na <= 1e-12 || nb <= 1e-12) return 0f
-        return (dot / sqrt(na * nb)).toFloat().coerceIn(0f, 1f)
-    }
-
-    private fun spectralProfile(pcm: ShortArray, sampleRate: Int): DoubleArray {
-        val bands = 24
-        val windowSize = 4096
-        val step = (sampleRate / 8_000).coerceAtLeast(1)
-        val effectiveRate = sampleRate / step
-        val usable = kotlin.math.min(pcm.size, sampleRate * 60)
-        if (usable < windowSize * step) return DoubleArray(bands)
-        val windows = 6
-        val maxBase = (usable / step - windowSize).coerceAtLeast(0)
-        val freqs = DoubleArray(bands) { i ->
-            60.0 * Math.pow(3_800.0 / 60.0, i.toDouble() / (bands - 1))
-        }
-        val out = DoubleArray(bands)
-        val twoPi = 2.0 * Math.PI
-        for (w in 0 until windows) {
-            val base = if (windows == 1) 0 else w * maxBase / (windows - 1)
-            for (b in 0 until bands) {
-                val omega = twoPi * freqs[b] / effectiveRate
-                var re = 0.0
-                var im = 0.0
-                for (i in 0 until windowSize) {
-                    val sampleIndex = (base + i) * step
-                    if (sampleIndex >= pcm.size) break
-                    val hann = 0.5 - 0.5 * cos(twoPi * i / windowSize)
-                    val value = pcm[sampleIndex] / 32768.0 * hann
-                    re += value * cos(omega * i)
-                    im -= value * kotlin.math.sin(omega * i)
+    /** Full key detection, including the relative minor mode. */
+    fun detectKeyEstimate(pcm: ShortArray, sampleRate: Int): KeyEstimate {
+        val chroma = chromaProfile(pcm, sampleRate) ?: return KeyEstimate(0, false, 0f)
+        var best = 0
+        var bestMinor = false
+        var bestScore = -1.0
+        var second = -1.0
+        for (minor in booleanArrayOf(false, true)) {
+            val profile = if (minor) MINOR_PROFILE else MAJOR_PROFILE
+            for (root in 0 until 12) {
+                val score = profileScore(chroma, root, profile)
+                if (score > bestScore) {
+                    second = bestScore
+                    bestScore = score
+                    best = root
+                    bestMinor = minor
+                } else if (score > second) {
+                    second = score
                 }
-                out[b] += sqrt(re * re + im * im)
             }
         }
-        val total = out.sum()
-        if (total > 1e-12) {
-            for (i in out.indices) out[i] /= total
+        val confidence = if (bestScore <= 0.0) 0f else {
+            ((bestScore - second) / bestScore).toFloat().coerceIn(0f, 1f)
         }
-        return out
+        return KeyEstimate(best, bestMinor, confidence)
+    }
+
+    private fun chromaProfile(pcm: ShortArray, sampleRate: Int): DoubleArray? {
+        if (pcm.size < 4096) return null
+        val step = (sampleRate / 8000).coerceAtLeast(1)
+        val effectiveRate = sampleRate / step
+        val windowSize = 4096
+        val windows = ((pcm.size / step - windowSize) / (windowSize / 2))
+            .coerceAtLeast(1).coerceAtMost(16)
+        val chroma = DoubleArray(12)
+        val twoPi = 2.0 * Math.PI
+        val re = DoubleArray(windowSize)
+        val im = DoubleArray(windowSize)
+        for (w in 0 until windows) {
+            val base = w * windowSize / 2
+            for (i in 0 until windowSize) {
+                re[i] = (pcm[(base + i) * step] / 32768.0) *
+                    (0.5 - 0.5 * cos(twoPi * i / windowSize))
+                im[i] = 0.0
+            }
+            fft(re, im)
+            for (bin in 1 until windowSize / 2) {
+                val freq = bin.toDouble() * effectiveRate / windowSize
+                if (freq < 65 || freq > 2100) continue
+                val magnitude = sqrt(re[bin] * re[bin] + im[bin] * im[bin])
+                if (magnitude <= 0.0) continue
+                val midi = 69 + 12 * kotlin.math.ln(freq / 440.0) / Math.log(2.0)
+                val pitchClass = ((midi.roundToInt() % 12) + 12) % 12
+                // Squaring favours strong partials over broadband noise.
+                chroma[pitchClass] += magnitude * magnitude
+            }
+        }
+        val total = chroma.sum()
+        if (total <= 0.0) return null
+        for (i in 0 until 12) chroma[i] /= total
+        return chroma
+    }
+
+    private fun profileScore(chroma: DoubleArray, root: Int, profile: DoubleArray): Double {
+        var score = 0.0
+        for (i in 0 until 12) score += chroma[(root + i) % 12] * profile[i]
+        return score
+    }
+
+    /** In-place iterative radix-2 FFT; [re]/[im] must have a power-of-two size. */
+    private fun fft(re: DoubleArray, im: DoubleArray) {
+        val n = re.size
+        var j = 0
+        for (i in 1 until n) {
+            var bit = n shr 1
+            while (j and bit != 0) {
+                j = j xor bit
+                bit = bit shr 1
+            }
+            j = j xor bit
+            if (i < j) {
+                val tr = re[i]; re[i] = re[j]; re[j] = tr
+                val ti = im[i]; im[i] = im[j]; im[j] = ti
+            }
+        }
+        var length = 2
+        while (length <= n) {
+            val angle = -2.0 * Math.PI / length
+            val wRe = cos(angle)
+            val wIm = kotlin.math.sin(angle)
+            var start = 0
+            while (start < n) {
+                var curRe = 1.0
+                var curIm = 0.0
+                for (k in 0 until length / 2) {
+                    val even = start + k
+                    val odd = even + length / 2
+                    val tRe = curRe * re[odd] - curIm * im[odd]
+                    val tIm = curRe * im[odd] + curIm * re[odd]
+                    re[odd] = re[even] - tRe
+                    im[odd] = im[even] - tIm
+                    re[even] += tRe
+                    im[even] += tIm
+                    val nextRe = curRe * wRe - curIm * wIm
+                    curIm = curRe * wIm + curIm * wRe
+                    curRe = nextRe
+                }
+                start += length
+            }
+            length = length shl 1
+        }
     }
 
     /** RMS-based integrated loudness, mapped into a LUFS-like scale. */

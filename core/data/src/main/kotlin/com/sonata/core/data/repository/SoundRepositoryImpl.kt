@@ -7,6 +7,7 @@ import com.sonata.core.database.entity.SoundEntity
 import com.sonata.core.database.entity.encodeWaveform
 import com.sonata.core.domain.model.ImportStatus
 import com.sonata.core.domain.model.MusicalKey
+import com.sonata.core.domain.model.PlaybackVariant
 import com.sonata.core.domain.model.Sound
 import com.sonata.core.domain.model.SoundSource
 import com.sonata.core.domain.model.Tag
@@ -60,11 +61,24 @@ class SoundRepositoryImpl @Inject constructor(
     override suspend fun updateMetadata(id: Long, title: String, artist: String?, album: String?) =
         withContext(io) { dao.updateMetadata(id, title, artist, album) }
 
+    override suspend fun updateCover(id: Long, coverPath: String?) =
+        withContext(io) { dao.updateCover(id, coverPath) }
+
     override suspend fun findByFingerprint(fingerprint: String): Sound? =
         withContext(io) { dao.findByFingerprint(fingerprint)?.toModel() }
 
     override suspend fun setImportStatus(id: Long, status: ImportStatus) =
         withContext(io) { dao.setImportStatus(id, status.name) }
+
+    override suspend fun setVariant(id: Long, variant: PlaybackVariant): Sound? = withContext(io) {
+        val entity = dao.getById(id) ?: return@withContext null
+        val path = when (variant) {
+            PlaybackVariant.CLIP -> entity.clipFilePath
+            PlaybackVariant.FULL -> entity.fullSongFilePath ?: entity.filePath
+        }?.takeIf { it.isNotBlank() } ?: return@withContext entity.toModel()
+        dao.updateVariant(id, path, variant.name)
+        dao.getById(id)?.toModel()
+    }
 
     override fun observeForSource(source: SoundSource): Flow<List<Sound>> =
         dao.observeBySource(source.name).map { it.map { e -> e.toModel() } }
@@ -84,6 +98,16 @@ class SoundRepositoryImpl @Inject constructor(
         tags = tags.split('|').filter { it.isNotBlank() },
         fingerprint = fingerprint,
         importStatus = runCatching { ImportStatus.valueOf(importStatus) }.getOrDefault(ImportStatus.READY),
+        clipFilePath = clipFilePath,
+        fullSongFilePath = fullSongFilePath,
+        matchOffsetMs = matchOffsetMs,
+        matchConfidence = matchConfidence,
+        effectSpeed = effectSpeed,
+        activeVariant = runCatching { PlaybackVariant.valueOf(activeVariant) }
+            .getOrDefault(PlaybackVariant.FULL),
+        tiktokMusicId = tiktokMusicId,
+        tiktokSoundName = tiktokSoundName,
+        tiktokCaption = tiktokCaption,
     )
 
     private fun Sound.toEntity() = SoundEntity(
@@ -94,5 +118,10 @@ class SoundRepositoryImpl @Inject constructor(
         addedAt = addedAt, filePath = filePath, coverPath = coverPath,
         waveformJson = waveform.toList().encodeWaveform(), tags = tags.joinToString("|"),
         fingerprint = fingerprint, importStatus = importStatus.name,
+        clipFilePath = clipFilePath, fullSongFilePath = fullSongFilePath,
+        matchOffsetMs = matchOffsetMs, matchConfidence = matchConfidence,
+        effectSpeed = effectSpeed, activeVariant = activeVariant.name,
+        tiktokMusicId = tiktokMusicId, tiktokSoundName = tiktokSoundName,
+        tiktokCaption = tiktokCaption,
     )
 }

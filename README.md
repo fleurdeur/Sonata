@@ -19,16 +19,17 @@ No account, no ads, no analytics, no uploads. Everything lives on the phone.
 3. It looks for the full sound behind the post. If TikTok exposes a genuinely
    longer music stream it is used. Otherwise Sonata searches YouTube through the
    BitChord InnerTube extractor, rejects covers, live cuts, loops and hour-long
-   edits, and downloads the best full-length match. Original sounds use the
-   caption as search text. A match is accepted only when acoustic correlation,
-   metadata and spectrum agree; the matched recording is downloaded in full,
-   never repeated.
-4. On the full recording, the clip's onset envelope is matched at every
-   plausible speed (0.75×–1.5×), so a sped-up edit stays sped up instead of
-   being slowed down by a half-time tempo reading. Pitch follows only when the
-   key shift agrees with the detected speed; reverb and bass are added only when
-   the clip's tail and tags show them. If no full song is available, the actual
-   clip is kept and tagged "clip only" — it is never looped.
+   edits, and tries the top candidates in order. Original sounds use explicit
+   caption hints, not arbitrary text. A candidate is accepted only after an
+   on-device acoustic proof: spectral-flux correlation plus chroma agreement at
+   a speed that stands clear of every other speed. Metadata alone never promotes
+   a file, and the matched recording is downloaded in full, never repeated.
+4. The matcher searches 0.70×–1.60× in 2% steps and keeps the exact offset of
+   the TikTok moment inside the rendered full song. Pitch follows only when the
+   chroma rotation clearly beats the untransposed comparison; reverb and bass
+   are added only when measured or explicitly tagged. If no candidate passes,
+   the actual clip is kept and tagged "clip only" — it is never looped. When a
+   full song is proven, both the clip and the full recording are stored.
 5. The result is peak-normalised, written as AAC and added to the library with
    cover, waveform, BPM, key and effect tags.
 
@@ -54,14 +55,19 @@ playlist creation and editing. Smart filters narrow the list to full songs,
 clips, tracks with lyrics, tracks with BPM, or short/long tracks. The tag editor
 updates title, artist and tags and re-matches lyrics when the identity changes.
 Search understands plain text (title, artist, tag) and phrases such as
-"slow 120 bpm under 40 seconds".
+"slow 120 bpm under 40 seconds". BPM is measured by onset autocorrelation and
+key by an FFT chroma profile, including minor keys and Camelot codes.
 
 ### Player
 
 Full player with large artwork, a tinted backdrop, waveform seek, play/pause,
-next/previous, repeat, playback speed, A-B loop and a sleep timer. A floating
-mini player sits above a rounded navigation dock and opens the player with a tap
-or an upward swipe.
+next/previous, repeat, playback speed, A-B loop and a sleep timer. TikTok tracks
+with both files get a Clip / Full song switch that keeps the musical position,
+plus a "jump to the TikTok moment" shortcut. Cues save any moment as a hot cue,
+memory or eight-second loop and are listed above the dock. A floating mini player
+sits above a rounded navigation dock and opens the player with a tap or an upward
+swipe; swiping it down fades the sound out and offers Undo. The current file can
+be exported through the system share sheet.
 
 ### Lyrics
 
@@ -94,10 +100,11 @@ marked unavailable instead of pretending to work.
 
 Theme (light, dark, pure black, system), Material You, six accent colours, a
 measured storage breakdown, cache clearing, the equalizer, and library backup.
-Backup writes a JSON file with track metadata, tags and lyrics (never audio or
-local paths) through the system file picker; restore matches those records to the
-current library by acoustic fingerprint. Only settings that change the app are
-shown.
+Backup writes a JSON file with track metadata, tags, lyrics and cues (never audio
+or local paths) through the system file picker; restore matches those records to
+the current library by acoustic fingerprint. Only settings that change the app are
+shown. The Stem separation placeholder is not shipped until a real separation
+engine exists.
 
 ## Build from source
 
@@ -129,7 +136,8 @@ Both the keystore and the properties file are git-ignored; never commit them.
 Kotlin + Jetpack Compose + Material 3, Hilt, Room, DataStore, WorkManager and
 Media3. Multi-module: `app`, `core/*` (common, domain, designsystem, database,
 datastore, data, audio, media, extractor, work, brain) and `feature/*` (home,
-library, mix, import, editor, settings, stems). Audio transforms live in
+library, mix, import, editor, settings). The `feature/stems` module remains in the
+repository but is deliberately not a dynamic feature of the app. Audio transforms live in
 `core/audio` as pure Kotlin so they are unit-tested on the JVM.
 
 ## Privacy

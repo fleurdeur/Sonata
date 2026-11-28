@@ -1,5 +1,11 @@
 package com.sonata
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -26,6 +32,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -33,6 +42,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.GraphicEq
@@ -41,9 +51,14 @@ import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -64,6 +79,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
@@ -75,6 +91,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -84,12 +101,17 @@ import com.sonata.core.designsystem.LocalRadius
 import com.sonata.core.designsystem.LocalSpacing
 import com.sonata.core.designsystem.components.formatDuration
 import com.sonata.core.designsystem.components.metadataLine
+import com.sonata.core.domain.model.Cue
+import com.sonata.core.domain.model.CueKind
 import com.sonata.core.domain.model.Lyrics
+import com.sonata.core.domain.model.PlaybackVariant
 import com.sonata.core.domain.model.Sound
+import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.domain.repository.SoundRepository
 import com.sonata.core.media.connection.PlayerConnection
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
 import kotlin.math.abs
@@ -109,6 +131,8 @@ import kotlinx.coroutines.launch
 class NowPlayingViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
     private val lyricsRepository: LyricsRepository,
+    private val cueRepository: CueRepository,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     val favorites = soundRepository.observeAll()
@@ -120,6 +144,10 @@ class NowPlayingViewModel @Inject constructor(
 
     private val _lyricsLoading = MutableStateFlow(false)
     val lyricsLoading: StateFlow<Boolean> = _lyricsLoading.asStateFlow()
+
+    private val _cues = MutableStateFlow<List<Cue>>(emptyList())
+    val cues: StateFlow<List<Cue>> = _cues.asStateFlow()
+    private var cueJob: Job? = null
 
     private var loadedSoundId: Long? = null
     private var lyricsJob: Job? = null
@@ -179,6 +207,78 @@ class NowPlayingViewModel @Inject constructor(
         _lyrics.value = _lyrics.value?.copy(offsetMs = offsetMs.coerceIn(-2_000L, 2_000L))
     }
 
+    fun switchVariant(sound: Sound, target: PlaybackVariant, onReady: (Sound) -> Unit) {
+        if (sound.activeVariant == target) return
+        viewModelScope.launch {
+            val updated = soundRepository.setVariant(sound.id, target) ?: return@launch
+            onReady(updated)
+        }
+    }
+
+    fun setCover(soundId: Long, uri: Uri, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = runCatching {
+                val dir = File(context.filesDir, "covers").apply { mkdirs() }
+                val target = File(dir, "sound_${soundId}_${System.currentTimeMillis()}.jpg")
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                } ?: error("The picked image could not be opened")
+                if (target.length() > 12L * 1024L * 1024L) {
+                    target.delete()
+                    error("Cover images must be smaller than 12 MB")
+                }
+                soundRepository.updateCover(soundId, target.absolutePath)
+                // A fresh filename also bypasses Coil's path-based cache.
+                dir.listFiles()?.forEach { old ->
+                    if (old != target && old.name.startsWith("sound_${soundId}_")) old.delete()
+                }
+            }.isSuccess
+            onDone(ok)
+        }
+    }
+
+    fun loadCues(soundId: Long?) {
+        cueJob?.cancel()
+        if (soundId == null) {
+            _cues.value = emptyList()
+            return
+        }
+        cueJob = viewModelScope.launch {
+            cueRepository.observe(soundId).collect { _cues.value = it }
+        }
+    }
+
+    fun addCue(
+        soundId: Long,
+        positionMs: Long,
+        kind: CueKind,
+        durationMs: Long,
+        timelineOffsetMs: Long,
+    ) {
+        viewModelScope.launch {
+            // Cues always live on the full-song timeline, even when the user
+            // drops them while listening to the clip.
+            val start = (positionMs + timelineOffsetMs).coerceAtLeast(0L)
+            val endLimit = timelineOffsetMs + durationMs.coerceAtLeast(positionMs + 500L)
+            val loopEnd = if (kind == CueKind.LOOP) {
+                (start + 8_000L).coerceAtMost(endLimit.coerceAtLeast(start + 500L))
+            } else {
+                null
+            }
+            cueRepository.add(
+                soundId = soundId,
+                positionMs = start,
+                label = kind.label + " " + formatDuration(positionMs),
+                kind = kind,
+                endMs = loopEnd,
+            )
+        }
+    }
+
+    fun deleteCue(id: Long) {
+        viewModelScope.launch { cueRepository.delete(id) }
+    }
+
     private suspend fun fetch(sound: Sound, refresh: Boolean): Lyrics? = try {
         if (refresh) {
             lyricsRepository.refresh(
@@ -226,15 +326,31 @@ fun NowPlayingScreen(
     val favorites by viewModel.favorites.collectAsState()
     val lyrics by viewModel.lyrics.collectAsState()
     val lyricsLoading by viewModel.lyricsLoading.collectAsState()
+    val cues by viewModel.cues.collectAsState()
     val sound = state.current
+    val context = LocalContext.current
 
     var showLyrics by rememberSaveable { mutableStateOf(false) }
     var sleepMinutes by remember { mutableIntStateOf(0) }
     var abStart by remember { mutableStateOf<Long?>(null) }
     var abEnd by remember { mutableStateOf<Long?>(null) }
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        val id = sound?.id ?: return@rememberLauncherForActivityResult
+        if (uri == null) return@rememberLauncherForActivityResult
+        viewModel.setCover(id, uri) { ok ->
+            Toast.makeText(
+                context,
+                if (ok) "Cover updated" else "Could not use that image",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
 
     LaunchedEffect(sound?.id) {
         viewModel.loadLyrics(sound)
+        viewModel.loadCues(sound?.id)
         showLyrics = false
         // A loop belongs to one recording; never carry it to the next track.
         abStart = null
@@ -268,7 +384,25 @@ fun NowPlayingScreen(
                 onToggleFavorite = {
                     sound?.let { viewModel.toggleFavorite(it.id, it.id in favorites) }
                 },
+                onExport = { sound?.let { exportSound(context, it) } },
             )
+
+            if (sound != null && sound.hasVariants) {
+                VariantSwitcher(
+                    sound = sound,
+                    onSelect = { target ->
+                        val offset = if (target == PlaybackVariant.FULL) {
+                            state.positionMs + sound.matchOffsetMs
+                        } else {
+                            state.positionMs - sound.matchOffsetMs
+                        }.coerceAtLeast(0L)
+                        viewModel.switchVariant(sound, target) { updated ->
+                            player.replaceCurrent(updated, offset)
+                        }
+                    },
+                    onJumpToMoment = { player.seekTo(sound.matchOffsetMs) },
+                )
+            }
 
             Crossfade(
                 targetState = showLyrics,
@@ -312,6 +446,7 @@ fun NowPlayingScreen(
                             val current = speeds.indexOfFirst { abs(it - state.speed) < 0.01f }
                             player.setSpeed(speeds[((current.coerceAtLeast(0)) + 1) % speeds.size])
                         },
+                        onChangeCover = { coverPicker.launch("image/*") },
                         onCycleAb = {
                             when {
                                 abStart == null -> abStart = state.positionMs
@@ -330,12 +465,133 @@ fun NowPlayingScreen(
                 }
             }
 
+            if (!showLyrics && sound != null) {
+                val clipOffset = if (sound.activeVariant == PlaybackVariant.CLIP) {
+                    sound.matchOffsetMs
+                } else {
+                    0L
+                }
+                val visibleCues = if (clipOffset <= 0L) {
+                    cues
+                } else {
+                    cues
+                        .filter { it.positionMs >= clipOffset }
+                        .map { cue ->
+                            cue.copy(
+                                positionMs = cue.positionMs - clipOffset,
+                                endMs = cue.endMs?.minus(clipOffset)?.coerceAtLeast(0L),
+                            )
+                        }
+                }
+                CueBar(
+                    cues = visibleCues,
+                    durationMs = state.durationMs.takeIf { it > 0 } ?: sound.durationMs,
+                    onAddCue = {
+                        viewModel.addCue(
+                            soundId = sound.id,
+                            positionMs = state.positionMs,
+                            kind = CueKind.HOT,
+                            durationMs = state.durationMs,
+                            timelineOffsetMs = clipOffset,
+                        )
+                    },
+                    onAddLoop = {
+                        viewModel.addCue(
+                            soundId = sound.id,
+                            positionMs = state.positionMs,
+                            kind = CueKind.LOOP,
+                            durationMs = state.durationMs,
+                            timelineOffsetMs = clipOffset,
+                        )
+                    },
+                    onCue = { cue ->
+                        if (cue.kind == CueKind.LOOP) {
+                            val end = (cue.endMs ?: (cue.positionMs + 8_000L)).coerceAtMost(
+                                (state.durationMs.takeIf { it > 0 } ?: sound.durationMs)
+                                    .coerceAtLeast(cue.positionMs + 500L),
+                            )
+                            player.setAbLoop(cue.positionMs, end)
+                        } else {
+                            player.seekTo(cue.positionMs)
+                        }
+                    },
+                    onDeleteCue = viewModel::deleteCue,
+                )
+            }
+
             PlayerDock(
                 state = state,
                 sound = sound,
                 player = player,
                 onOpenEq = onOpenEq,
             )
+        }
+    }
+}
+
+private fun exportSound(context: Context, sound: Sound) {
+    val file = File(sound.filePath)
+    if (!file.exists()) {
+        Toast.makeText(context, "The audio file is missing", Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        val uri = FileProvider.getUriForFile(
+            context,
+            context.packageName + ".fileprovider",
+            file,
+        )
+        val mime = if (file.extension.equals("wav", ignoreCase = true)) "audio/wav" else "audio/mp4"
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(send, "Export " + sound.title)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(chooser)
+    }.onFailure {
+        Toast.makeText(context, "Could not export this sound", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun VariantSwitcher(
+    sound: Sound,
+    onSelect: (PlaybackVariant) -> Unit,
+    onJumpToMoment: () -> Unit,
+) {
+    val spacing = LocalSpacing.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = spacing.lgDp, vertical = 4.dp),
+    ) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            val options = listOf(
+                PlaybackVariant.CLIP to "TikTok clip",
+                PlaybackVariant.FULL to "Full song",
+            )
+            options.forEachIndexed { index, (variant, label) ->
+                SegmentedButton(
+                    selected = sound.activeVariant == variant,
+                    onClick = { onSelect(variant) },
+                    shape = SegmentedButtonDefaults.itemShape(index, options.size),
+                ) {
+                    Text(
+                        if (variant == PlaybackVariant.FULL && sound.effectSpeed != 1f) {
+                            "Full song · " + sound.effectSpeed + "x"
+                        } else {
+                            label
+                        },
+                    )
+                }
+            }
+        }
+        if (sound.activeVariant == PlaybackVariant.FULL && sound.matchOffsetMs > 0) {
+            TextButton(onClick = onJumpToMoment) {
+                Text("Jump to the TikTok moment · " + formatDuration(sound.matchOffsetMs))
+            }
         }
     }
 }
@@ -348,6 +604,7 @@ private fun NowPlayingTopBar(
     onCollapse: () -> Unit,
     onToggleLyrics: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onExport: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -382,6 +639,12 @@ private fun NowPlayingTopBar(
                 tint = if (lyricsActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        IconButton(onClick = onExport, enabled = sound != null) {
+            Icon(
+                Icons.Filled.Share,
+                contentDescription = "Export current audio",
+            )
+        }
         IconButton(onClick = onToggleFavorite, enabled = sound != null) {
             Icon(
                 if (favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
@@ -405,6 +668,7 @@ private fun PlayerPage(
     onToggleSleep: () -> Unit,
     onCycleSpeed: () -> Unit,
     onCycleAb: () -> Unit,
+    onChangeCover: () -> Unit,
 ) {
     val spacing = LocalSpacing.current
     val radius = LocalRadius.current
@@ -451,6 +715,24 @@ private fun PlayerPage(
                         ),
                     ),
             )
+            if (sound != null) {
+                IconButton(
+                    onClick = onChangeCover,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+                            CircleShape,
+                        ),
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Change cover art",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
         }
 
         Spacer(Modifier.height(22.dp))
@@ -566,6 +848,7 @@ private fun PlayerDock(
     ) {
         WaveformScrubber(
             waveform = sound?.waveform?.toList().orEmpty(),
+            bpm = sound?.bpm,
             positionMs = state.positionMs,
             durationMs = state.durationMs.takeIf { it > 0 } ?: sound?.durationMs ?: 0,
             onSeek = { player.seekTo(it) },
@@ -696,6 +979,64 @@ private fun TrackBadge(text: String) {
 }
 
 @Composable
+private fun CueBar(
+    cues: List<Cue>,
+    durationMs: Long,
+    onAddCue: () -> Unit,
+    onAddLoop: () -> Unit,
+    onCue: (Cue) -> Unit,
+    onDeleteCue: (Long) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ActionPill(
+            icon = Icons.Filled.Add,
+            label = "Cue",
+            active = false,
+            onClick = onAddCue,
+        )
+        ActionPill(
+            icon = Icons.Filled.Repeat,
+            label = "Loop",
+            active = false,
+            onClick = onAddLoop,
+        )
+        cues.forEach { cue ->
+            InputChip(
+                selected = false,
+                onClick = { onCue(cue) },
+                label = {
+                    Text(
+                        cue.label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                },
+                trailingIcon = {
+                    IconButton(
+                        onClick = { onDeleteCue(cue.id) },
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Delete " + cue.label,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                },
+            )
+        }
+    }
+}
+
+@Composable
 private fun ActionPill(
     icon: ImageVector?,
     label: String,
@@ -760,6 +1101,7 @@ private fun speedLabel(speed: Float): String {
 @Composable
 private fun WaveformScrubber(
     waveform: List<Float>,
+    bpm: Int?,
     positionMs: Long,
     durationMs: Long,
     onSeek: (Long) -> Unit,
@@ -769,6 +1111,7 @@ private fun WaveformScrubber(
     val playedColor = MaterialTheme.colorScheme.primary
     val restColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val cursorColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+    val beatColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
     val fraction = scrubFraction ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
 
     fun previewAt(x: Float, width: Int): Float? {
@@ -823,6 +1166,22 @@ private fun WaveformScrubber(
                 size = Size(barWidth, h),
                 cornerRadius = CornerRadius(barWidth / 2f),
             )
+        }
+        // Downbeat grid: four beats per barlines keep the ticks readable
+        // without turning a three-minute waveform into a solid block.
+        bpm?.takeIf { it in 40..220 && durationMs > 0 }?.let { tempo ->
+            val barMs = 60_000.0 / tempo * 4.0
+            var t = 0.0
+            while (t < durationMs) {
+                val x = (t / durationMs * size.width).toFloat()
+                drawLine(
+                    color = beatColor,
+                    start = Offset(x, 0f),
+                    end = Offset(x, size.height),
+                    strokeWidth = 1.dp.toPx(),
+                )
+                t += barMs
+            }
         }
         drawLine(
             color = cursorColor,

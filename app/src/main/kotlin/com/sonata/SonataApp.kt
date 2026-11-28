@@ -31,6 +31,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -40,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -123,6 +127,16 @@ fun SonataApp(
 
     var showImport by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val settings by appViewModel.settings.collectAsState()
+    val playerState by appViewModel.player.state.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    var miniPlayerHidden by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playerState.current?.id) {
+        // A new track always brings its mini player back.
+        miniPlayerHidden = false
+    }
 
     LaunchedEffect(pendingShares) {
         if (pendingShares.isNotEmpty()) {
@@ -153,10 +167,30 @@ fun SonataApp(
                         .padding(horizontal = Dimensions.bottomBarInset)
                         .padding(top = Dimensions.bottomBarInset, bottom = 8.dp),
                 ) {
-                    MiniPlayerBar(
-                        player = appViewModel.player,
-                        onOpenNowPlaying = { navController.navigate("nowPlaying") { launchSingleTop = true } },
-                    )
+                    if (!miniPlayerHidden) {
+                        MiniPlayerBar(
+                            player = appViewModel.player,
+                            onOpenNowPlaying = {
+                                navController.navigate("nowPlaying") { launchSingleTop = true }
+                            },
+                            swipeToDismiss = settings.miniPlayerSwipeDismiss,
+                            onDismiss = {
+                                miniPlayerHidden = true
+                                scope.launch {
+                                    appViewModel.player.fadeOutAndPause()
+                                    val result = snackbarHostState.showSnackbar(
+                                        message = "Paused " + (playerState.current?.title ?: "playback"),
+                                        actionLabel = "Undo",
+                                        withDismissAction = true,
+                                    )
+                                    if (result == SnackbarResult.ActionPerformed) {
+                                        appViewModel.player.resumeAfterStop()
+                                        miniPlayerHidden = false
+                                    }
+                                }
+                            },
+                        )
+                    }
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -225,6 +259,13 @@ fun SonataApp(
                     }
                 }
             }
+
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 156.dp, start = 16.dp, end = 16.dp),
+            )
 
             if (!onboardingDone) {
                 OnboardingPager(

@@ -38,6 +38,7 @@ class SettingsDataStore @Inject constructor(
         val blur = intPreferencesKey("blur")
         val animationSpeed = floatPreferencesKey("animation_speed")
         val haptics = floatPreferencesKey("haptics")
+        val swipeDismiss = booleanPreferencesKey("mini_swipe_dismiss")
         val gapless = booleanPreferencesKey("gapless")
         val loudness = booleanPreferencesKey("loudness_norm")
         val pauseOnDisconnect = booleanPreferencesKey("pause_disconnect")
@@ -60,6 +61,7 @@ class SettingsDataStore @Inject constructor(
             blurStrength = p[Keys.blur] ?: 16,
             animationSpeed = p[Keys.animationSpeed] ?: 1f,
             hapticIntensity = p[Keys.haptics] ?: 1f,
+            miniPlayerSwipeDismiss = p[Keys.swipeDismiss] ?: true,
             gapless = p[Keys.gapless] ?: true,
             loudnessNormalization = p[Keys.loudness] ?: true,
             pauseOnDisconnect = p[Keys.pauseOnDisconnect] ?: true,
@@ -83,6 +85,7 @@ class SettingsDataStore @Inject constructor(
             p[Keys.blur] = s.blurStrength
             p[Keys.animationSpeed] = s.animationSpeed
             p[Keys.haptics] = s.hapticIntensity
+            p[Keys.swipeDismiss] = s.miniPlayerSwipeDismiss
             p[Keys.gapless] = s.gapless
             p[Keys.loudness] = s.loudnessNormalization
             p[Keys.pauseOnDisconnect] = s.pauseOnDisconnect
@@ -99,9 +102,21 @@ class SettingsDataStore @Inject constructor(
     private fun current(p: androidx.datastore.preferences.core.Preferences): Settings =
         Settings(
             themeMode = p[Keys.theme]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
+            dynamicColor = p[Keys.dynamic] ?: true,
             accent = p[Keys.accent] ?: 0xFF4B44C7.toInt(),
             playerStyle = p[Keys.playerStyle]?.let { runCatching { PlayerStyle.valueOf(it) }.getOrNull() }
                 ?: PlayerStyle.FULL_BLEED,
+            blurStrength = p[Keys.blur] ?: 16,
+            animationSpeed = p[Keys.animationSpeed] ?: 1f,
+            hapticIntensity = p[Keys.haptics] ?: 1f,
+            miniPlayerSwipeDismiss = p[Keys.swipeDismiss] ?: true,
+            gapless = p[Keys.gapless] ?: true,
+            loudnessNormalization = p[Keys.loudness] ?: true,
+            pauseOnDisconnect = p[Keys.pauseOnDisconnect] ?: true,
+            resumeOnHeadset = p[Keys.resumeOnHeadset] ?: false,
+            smartShuffle = p[Keys.smartShuffle] ?: true,
+            autoMix = p[Keys.autoMix] ?: false,
+            suggestionsFrequency = p[Keys.suggestions] ?: 2,
             onboardingDone = p[Keys.onboarding] ?: false,
             streamingEnabled = p[Keys.streaming] ?: false,
             watchedFolders = p[Keys.watchedFolders]?.split('|')?.filter { it.isNotBlank() } ?: emptyList(),

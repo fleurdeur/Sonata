@@ -40,6 +40,15 @@ data class SoundEntity(
     val tags: String = "",
     val fingerprint: String? = null,
     val importStatus: String = "READY",
+    val clipFilePath: String? = null,
+    val fullSongFilePath: String? = null,
+    val matchOffsetMs: Long = 0,
+    val matchConfidence: Float? = null,
+    val effectSpeed: Float = 1f,
+    val activeVariant: String = "FULL",
+    val tiktokMusicId: String? = null,
+    val tiktokSoundName: String? = null,
+    val tiktokCaption: String? = null,
 )
 
 @Fts4(contentEntity = SoundEntity::class)

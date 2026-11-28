@@ -60,6 +60,17 @@
             </intent-filter>
         </service>
 
+        <!-- Audio export: grants temporary read access to one rendered sound -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- WorkManager: on-demand initializer (Hilt) -->
         <provider
             android:name="androidx.startup.InitializationProvider"

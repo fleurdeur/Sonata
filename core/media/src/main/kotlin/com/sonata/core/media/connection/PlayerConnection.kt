@@ -141,6 +141,44 @@ class PlayerConnection @Inject constructor(
         controller?.setPlaybackSpeed(speed)
     }
 
+    /** Fades the mini player out, then pauses; [resumeAfterStop] restores it. */
+    suspend fun fadeOutAndPause(durationMs: Long = 420L) {
+        val player = controller ?: return
+        if (!player.isPlaying) {
+            player.pause()
+            return
+        }
+        val startVolume = player.volume
+        val steps = (durationMs / 20L).toInt().coerceAtLeast(4)
+        for (i in 1..steps) {
+            player.volume = startVolume * (1f - i.toFloat() / steps)
+            delay(20L)
+        }
+        player.pause()
+        player.volume = startVolume
+    }
+
+    fun resumeAfterStop() {
+        controller?.play()
+    }
+
+    /**
+     * Replaces the current item with the other playable variant while keeping
+     * the musical position. The caller supplies the already mapped position.
+     */
+    fun replaceCurrent(sound: Sound, positionMs: Long): Boolean {
+        val player = controller ?: return false
+        val index = queuedSounds.indexOfFirst { it.id == sound.id }
+        if (index < 0) return false
+        val wasPlaying = player.isPlaying
+        queuedSounds = queuedSounds.toMutableList().apply { this[index] = sound }
+        player.replaceMediaItem(index, sound.toMediaItem())
+        player.seekTo(positionMs.coerceAtLeast(0L))
+        if (wasPlaying) player.play()
+        onPlayerChanged()
+        return true
+    }
+
     fun cycleRepeat(): Int {
         val player = controller ?: return Player.REPEAT_MODE_OFF
         val next = when (player.repeatMode) {

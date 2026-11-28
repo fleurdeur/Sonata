@@ -6,6 +6,7 @@ import com.sonata.core.data.lyrics.LyricsProvider
 import com.sonata.core.data.lyrics.NetEaseProvider
 import com.sonata.core.data.lyrics.QqMusicProvider
 import com.sonata.core.data.repository.BrainRepositoryImpl
+import com.sonata.core.data.repository.CueRepositoryImpl
 import com.sonata.core.data.repository.LyricsRepositoryImpl
 import com.sonata.core.data.repository.ImportRepositoryImpl
 import com.sonata.core.data.repository.MixRepositoryImpl
@@ -13,6 +14,7 @@ import com.sonata.core.data.repository.PlaylistRepositoryImpl
 import com.sonata.core.data.repository.PresetRepositoryImpl
 import com.sonata.core.data.repository.SoundRepositoryImpl
 import com.sonata.core.domain.repository.BrainRepository
+import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.domain.repository.ImportRepository
 import com.sonata.core.domain.repository.MixRepository
@@ -37,6 +39,7 @@ abstract class DataModule {
     @Binds @Singleton abstract fun importRepository(impl: ImportRepositoryImpl): ImportRepository
     @Binds @Singleton abstract fun brainRepository(impl: BrainRepositoryImpl): BrainRepository
     @Binds @Singleton abstract fun lyricsRepository(impl: LyricsRepositoryImpl): LyricsRepository
+    @Binds @Singleton abstract fun cueRepository(impl: CueRepositoryImpl): CueRepository
 
     companion object {
         @Provides @IntoSet fun lrclib(provider: LrclibProvider): LyricsProvider = provider

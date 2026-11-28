@@ -32,50 +32,49 @@ data class TikTokVideo(
     val musicDurationMs: Long,
     val musicAudioUrl: String?,
     val isOriginalSound: Boolean,
+    val matchedSongTitle: String? = null,
+    val matchedSongArtist: String? = null,
+    val album: String? = null,
+    val musicId: String? = null,
+    val hashtags: List<String> = emptyList(),
+    val searchHints: List<TrackHint> = emptyList(),
+    val effectHints: Set<String> = emptySet(),
 ) {
     /** The title a human would recognise in a library. */
     val displayTitle: String
         get() {
-            val music = musicTitle?.trim().orEmpty()
-            val cleanMusic = cleanSoundTitle(music)
-            if (!isOriginalSound && cleanMusic.isNotBlank() && !cleanMusic.equals("original sound", true)) {
-                return cleanMusic
+            val matched = matchedSongTitle?.trim().orEmpty()
+            if (matched.isNotBlank()) return matched
+            if (!isOriginalSound) {
+                CaptionParser.cleanSoundTitle(musicTitle)?.let { return it }
             }
+            searchHints.firstOrNull { it.source == "caption" || it.source == "hashtag" }
+                ?.title?.takeIf { it.isNotBlank() }?.let { return it }
             val desc = description.trim().lineSequence().firstOrNull().orEmpty()
             return desc.take(80).ifBlank { "TikTok sound" }
         }
 
     val displayArtist: String?
-        get() = musicAuthor?.trim()?.takeIf { it.isNotBlank() && !it.equals("TikTok", true) }
-            ?: authorName?.trim()?.takeIf { it.isNotBlank() }
-            ?: authorHandle
+        get() = matchedSongArtist?.trim()?.takeIf { it.isNotBlank() }
+            ?: musicAuthor?.trim()?.takeIf {
+                it.isNotBlank() && !it.equals("TikTok", true) && !it.equals("original sound", true)
+            }
+            ?: searchHints.firstOrNull()?.artist
 
-    /** Query used to look for a longer version of the same song. */
+    /** Best first search identity, or null when the sound has no song name. */
     val fullTrackQuery: String?
-        get() {
-            val music = cleanSoundTitle(musicTitle.orEmpty())
-            val title = music.takeIf { it.isNotBlank() && !it.equals("original sound", true) }
-                ?: description.lineSequence().firstOrNull()
-                    ?.trim()
-                    ?.takeIf { it.length >= 3 }
-                ?: return null
-            val artist = musicAuthor?.trim()
-                ?.takeIf { it.isNotBlank() && !it.equals("TikTok", true) && !it.equals("original sound", true) }
-            return listOfNotNull(title, artist).joinToString(" ")
+        get() = searchHints.firstOrNull()?.let { hint ->
+            listOfNotNull(hint.title, hint.artist).joinToString(" ")
         }
 
-    private fun cleanSoundTitle(raw: String): String {
-        var t = raw
-        val suffixes = listOf(" - original sound", " original sound", "(original sound)", "[original sound]")
-        suffixes.forEach { t = t.replace(it, "", ignoreCase = true) }
-        // TikTok often stores "Artist - Song"; keep it readable either way.
-        return t.trim().removeSurrounding("\"")
-    }
+    /** Explicit matched song, sound name and caption credit, best first. */
+    val fullTrackHints: List<TrackHint>
+        get() = searchHints
 }
 
 /** TikTok share links: canonical, mobile and short (vt/vm) forms. */
 object TikTokUrls {
-    private val hostRegex = Regex("(?i)(?:https?://)?(?:[a-z0-9-]+\\.)*(?:tiktok\\.com|douyin\\.com|iesdouyin\\.com)/[^\\s]+")
+    private val hostRegex = Regex("""(?i)(?:https?://)?(?:[a-z0-9-]+\.)*(?:tiktok\.com|douyin\.com|iesdouyin\.com)/[^\s]+""")
 
     fun firstUrlIn(text: String): String? =
         hostRegex.find(text)?.value?.trimEnd('.', ',', ')', ']', '"', '\'')?.let { candidate ->
@@ -106,7 +105,9 @@ object TikTokUrls {
  * TikTok client, no login and no signing: the public mobile endpoint that the
  * app itself uses for one aweme, plus a plain downloader for the media.
  */
-class TikTokApi @Inject constructor() {
+class TikTokApi @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
+) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -207,10 +208,28 @@ class TikTokApi @Inject constructor() {
         val author = item["author"] as? JsonObject
         val videoDuration = video?.long("duration") ?: 0L
         val musicDuration = music?.long("duration")?.let { it * 1000 } ?: 0L
+        val description = item.string("desc").orEmpty()
+        val hashtags = hashtags(item, description)
+        val original = music?.bool("is_original_sound") == true ||
+            music?.bool("is_original") == true ||
+            music?.string("title").orEmpty().startsWith("original sound", true)
+        val matched = findSongInfo(music, item)
+        val hints = CaptionParser.hints(
+            description = description,
+            hashtags = hashtags,
+            soundTitle = music?.string("title"),
+            soundAuthor = music?.string("author"),
+            matchedTitle = matched?.first,
+            matchedArtist = matched?.second,
+            isOriginalSound = original,
+        )
+        if (android.util.Log.isLoggable("SonataTikTok", android.util.Log.DEBUG) && music != null) {
+            android.util.Log.d("SonataTikTok", "music=" + music.toString().take(4_000))
+        }
         return TikTokVideo(
             awemeId = id,
             shareUrl = shareUrl,
-            description = item.string("desc").orEmpty(),
+            description = description,
             authorHandle = author?.string("unique_id"),
             authorName = author?.string("nickname"),
             videoUrl = video?.let(::bestUrl),
@@ -221,10 +240,54 @@ class TikTokApi @Inject constructor() {
             musicAuthor = music?.string("author"),
             musicDurationMs = musicDuration,
             musicAudioUrl = music?.let(::bestUrl) ?: music?.string("strong_beat_url"),
-            isOriginalSound = music?.bool("is_original_sound") == true ||
-                music?.bool("is_original") == true ||
-                music?.string("title").orEmpty().startsWith("original sound", true),
+            isOriginalSound = original,
+            matchedSongTitle = matched?.first,
+            matchedSongArtist = matched?.second,
+            album = findString(music, "album", "album_name", "album_title"),
+            musicId = music?.string("music_id") ?: music?.string("id") ?: music?.string("mid"),
+            hashtags = hashtags,
+            searchHints = hints,
+            effectHints = CaptionParser.effects(description, hashtags),
         )
+    }
+
+    /** The matched/external song block has changed names over time; probe common shapes. */
+    private fun findSongInfo(music: JsonObject?, root: JsonObject): Pair<String, String?>? {
+        val blocks = listOfNotNull(
+            music?.get("matched_song") as? JsonObject,
+            music?.get("external_song_info") as? JsonObject,
+            music?.get("song_info") as? JsonObject,
+            root["matched_song"] as? JsonObject,
+            root["external_song_info"] as? JsonObject,
+        )
+        for (block in blocks) {
+            val title = findString(block, "song_name", "music_name", "title", "name")
+            if (!title.isNullOrBlank()) {
+                val artist = findString(block, "artist_name", "author_name", "singer_name", "artist", "author")
+                return title to artist
+            }
+        }
+        val title = music?.string("matched_song_title") ?: music?.string("song_name")
+        if (!title.isNullOrBlank()) {
+            return title to (music?.string("matched_song_artist") ?: music?.string("artist_name"))
+        }
+        return null
+    }
+
+    private fun hashtags(item: JsonObject, description: String): List<String> {
+        val fromApi = (item["text_extra"] as? kotlinx.serialization.json.JsonArray)
+            ?.mapNotNull { extra ->
+                (extra as? JsonObject)?.string("hashtag_name")?.takeIf { it.isNotBlank() }
+            }.orEmpty()
+        val fromText = Regex("""#([\p{L}\p{N}_]{2,40})""").findAll(description)
+            .map { it.groupValues[1] }.toList()
+        return (fromApi + fromText).distinct()
+    }
+
+    private fun findString(obj: JsonObject?, vararg keys: String): String? {
+        if (obj == null) return null
+        for (key in keys) obj.string(key)?.takeIf { it.isNotBlank() }?.let { return it }
+        return null
     }
 
     private fun bestUrl(obj: JsonObject): String? {
@@ -319,7 +382,6 @@ class TikTokApi @Inject constructor() {
         }
     }
 }
-
 /**
  * Streams remote media to disk atomically. Bytes go to a .part file, the
  * declared content length is verified, and only a complete response is

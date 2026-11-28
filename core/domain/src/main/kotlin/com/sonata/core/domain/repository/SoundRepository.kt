@@ -1,6 +1,7 @@
 package com.sonata.core.domain.repository
 
 import com.sonata.core.domain.model.ImportStatus
+import com.sonata.core.domain.model.PlaybackVariant
 import com.sonata.core.domain.model.Sound
 import com.sonata.core.domain.model.SoundSource
 import com.sonata.core.domain.model.Tag
@@ -18,7 +19,9 @@ interface SoundRepository {
     suspend fun incrementLoopCount(id: Long)
     suspend fun addTag(id: Long, tag: String)
     suspend fun updateMetadata(id: Long, title: String, artist: String?, album: String?)
+    suspend fun updateCover(id: Long, coverPath: String?)
     suspend fun findByFingerprint(fingerprint: String): Sound?
     suspend fun setImportStatus(id: Long, status: ImportStatus)
+    suspend fun setVariant(id: Long, variant: PlaybackVariant): Sound?
     fun observeForSource(source: SoundSource): Flow<List<Sound>>
 }
