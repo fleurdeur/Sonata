@@ -30,6 +30,8 @@ class SoundRepositoryImpl @Inject constructor(
     override fun observeSound(id: Long): Flow<Sound?> =
         dao.observeById(id).map { it?.toModel() }
 
+    override suspend fun get(id: Long): Sound? = withContext(io) { dao.getById(id)?.toModel() }
+
     override fun search(query: String): Flow<List<Sound>> =
         dao.search(sanitizeFts(query)).map { it.map { e -> e.toModel() } }
 

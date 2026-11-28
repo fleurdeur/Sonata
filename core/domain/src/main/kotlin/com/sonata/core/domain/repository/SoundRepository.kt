@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 interface SoundRepository {
     fun observeAll(): Flow<List<Sound>>
     fun observeSound(id: Long): Flow<Sound?>
+    suspend fun get(id: Long): Sound?
     fun search(query: String): Flow<List<Sound>>
     fun observeTags(): Flow<List<Tag>>
     suspend fun upsert(sound: Sound): Long

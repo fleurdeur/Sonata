@@ -31,6 +31,18 @@ class BpmKeyTest {
     }
 
     @Test
+    fun `bpm detection does not report half-time for a 140 bpm record`() {
+        val bpm = AudioAnalysis.detectBpm(clickTrack(140), 44100)
+        assertTrue("expected a 140 BPM reading, got $bpm", bpm in 136..144)
+    }
+
+    @Test
+    fun `bpm detection finds 90 bpm`() {
+        val bpm = AudioAnalysis.detectBpm(clickTrack(90), 44100)
+        assertTrue("bpm=$bpm", bpm in 86..94)
+    }
+
+    @Test
     fun `key detection resolves C major from a C chord`() {
         val sampleRate = 44100
         val cChord = ShortArray(sampleRate * 2) { i ->

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
@@ -66,6 +67,7 @@ import com.sonata.core.designsystem.LocalSpacing
 import com.sonata.core.domain.model.ImportJob
 import com.sonata.core.domain.model.ImportStage
 import com.sonata.core.domain.repository.ImportRepository
+import com.sonata.core.work.pipeline.FullSongQueue
 import com.sonata.core.work.pipeline.ImportQueue
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.File
@@ -78,6 +80,7 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class ImportViewModel @Inject constructor(
     private val queue: ImportQueue,
+    private val fullSongQueue: FullSongQueue,
     private val importRepository: ImportRepository,
 ) : ViewModel() {
 
@@ -96,7 +99,13 @@ class ImportViewModel @Inject constructor(
     fun importFile(uri: String) = viewModelScope.launch { queue.enqueue(uri, isLink = false) }
 
     fun cancel(jobId: String) = viewModelScope.launch { queue.cancel(jobId) }
-    fun retry(job: ImportJob) = viewModelScope.launch { queue.retry(job) }
+    fun retry(job: ImportJob) = viewModelScope.launch {
+        if (job.soundId != null && job.sourceUri.contains("youtube.com/watch", ignoreCase = true)) {
+            fullSongQueue.retry(job)
+        } else {
+            queue.retry(job)
+        }
+    }
 }
 
 /**
@@ -121,6 +130,7 @@ fun ImportSheet(
     var recording by remember { mutableStateOf<MediaRecorder?>(null) }
     var recordingFile by remember { mutableStateOf<File?>(null) }
     var recordingSeconds by remember { mutableStateOf(0) }
+    var picker by remember { mutableStateOf<Pair<Long, String?>?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -267,11 +277,23 @@ fun ImportSheet(
                             onCancel = { viewModel.cancel(job.id) },
                             onRetry = { viewModel.retry(job) },
                             onOpen = { job.soundId?.let { id -> onOpenSound(id) } },
+                            onChooseFull = {
+                                job.soundId?.let { id -> picker = id to job.id }
+                            },
                         )
                     }
                 }
             }
         }
+    }
+
+    picker?.let { (soundId, parentJobId) ->
+        FullSongPickerDialog(
+            soundId = soundId,
+            parentJobId = parentJobId,
+            fallbackQuery = "",
+            onDismiss = { picker = null },
+        )
     }
 
     if (showLinkDialog) {
@@ -353,7 +375,13 @@ private fun ImportAction(
 }
 
 @Composable
-private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onRetry: () -> Unit, onOpen: () -> Unit) {
+private fun ImportRow(
+    job: ImportJob,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    onOpen: () -> Unit,
+    onChooseFull: () -> Unit,
+) {
     val spacing = LocalSpacing.current
     val finished = job.stage == ImportStage.DONE
     val failed = job.stage == ImportStage.FAILED
@@ -410,11 +438,27 @@ private fun ImportRow(job: ImportJob, onCancel: () -> Unit, onRetry: () -> Unit,
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
+            val chooseFull = job.soundId != null && (
+                (finished && job.fullSongVerified == false &&
+                    job.sourceUri.contains("tiktok", ignoreCase = true)) ||
+                    (failed && job.sourceUri.contains("youtube.com/watch", ignoreCase = true))
+                )
+            if (chooseFull) {
+                TextButton(
+                    onClick = onChooseFull,
+                    modifier = Modifier.padding(top = 2.dp),
+                ) {
+                    Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text("Choose another recording", Modifier.padding(start = 6.dp))
+                }
+            }
             if (failed) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onRetry) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("Retry", Modifier.padding(start = 6.dp))
+                    if (job.canRetry) {
+                        TextButton(onClick = onRetry) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Text("Retry", Modifier.padding(start = 6.dp))
+                        }
                     }
                     TextButton(onClick = onCancel) { Text("Dismiss") }
                 }

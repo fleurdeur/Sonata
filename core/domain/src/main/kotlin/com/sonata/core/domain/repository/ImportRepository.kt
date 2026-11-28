@@ -27,6 +27,7 @@ interface ImportRepository {
         attempt: Int? = null,
         fullSongVerified: Boolean? = null,
         matchConfidence: Float? = null,
+        soundId: Long? = null,
     )
 
     suspend fun cancel(jobId: String)

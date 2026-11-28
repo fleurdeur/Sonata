@@ -407,7 +407,7 @@ fun SettingsScreen(
             Column(Modifier.padding(top = spacing.mdDp)) {
                 Text("Accent", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    if (settings.dynamicColor) "Turn off Material You to pick an accent"
+                    if (settings.dynamicColor) "Mixed into the wallpaper palette"
                     else "Used by buttons, sliders and the mini player",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -429,7 +429,7 @@ fun SettingsScreen(
                                     if (selected) Modifier.border(3.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
                                     else Modifier,
                                 )
-                                .clickable(enabled = !settings.dynamicColor) {
+                                .clickable {
                                     viewModel.update { it.copy(accent = preset.light.value.toInt()) }
                                 }
                                 .semantics { contentDescription = "${preset.name} accent" },

@@ -18,7 +18,7 @@ import java.nio.ByteOrder
  */
 object PcmFileWriter {
 
-    const val BITRATE = 192_000
+    const val BITRATE = 256_000
 
     fun write(pcm: ShortArray, sampleRate: Int, m4a: File): File {
         val wavFile = File(m4a.parentFile, m4a.nameWithoutExtension + ".wav")

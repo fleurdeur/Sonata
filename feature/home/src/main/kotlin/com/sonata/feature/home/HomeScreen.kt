@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Add
@@ -62,12 +63,16 @@ import com.sonata.core.designsystem.components.SoundArtwork
 import com.sonata.core.designsystem.components.SoundRow
 import com.sonata.core.domain.model.Sound
 import com.sonata.core.domain.model.SoundSource
+import com.sonata.core.domain.repository.BrainContext
+import com.sonata.core.domain.repository.BrainRepository
 import com.sonata.core.domain.repository.Settings
+import com.sonata.core.domain.repository.Suggestion
 import com.sonata.core.domain.repository.SettingsRepository
 import com.sonata.core.domain.repository.SoundRepository
 import com.sonata.core.media.connection.PlayerConnection
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.File
+import java.time.LocalTime
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +83,7 @@ import kotlinx.coroutines.launch
 class HomeViewModel @Inject constructor(
     private val soundRepository: SoundRepository,
     private val player: PlayerConnection,
+    private val brainRepository: BrainRepository,
     settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
@@ -86,6 +92,23 @@ class HomeViewModel @Inject constructor(
 
     val settings: StateFlow<Settings> = settingsRepository.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
+    val suggestions: StateFlow<List<Suggestion>> = brainRepository.observeSuggestions(
+        BrainContext(
+            hourOfDay = LocalTime.now().hour,
+            isHeadphones = false,
+            isBluetooth = false,
+            volumePercent = 50,
+        ),
+    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun acceptSuggestion(suggestion: Suggestion) = viewModelScope.launch {
+        brainRepository.accept(suggestion)
+    }
+
+    fun dismissSuggestion(id: String) = viewModelScope.launch {
+        brainRepository.dismiss(id)
+    }
 
     fun playAll(sounds: List<Sound>, startIndex: Int = 0) = viewModelScope.launch {
         if (sounds.isEmpty() || startIndex !in sounds.indices) return@launch
@@ -108,6 +131,7 @@ fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val sounds by viewModel.sounds.collectAsState()
+    val suggestions by viewModel.suggestions.collectAsState()
     val spacing = LocalSpacing.current
     val recent = remember(sounds) { sounds.sortedByDescending { it.addedAt } }
     val mostPlayed = remember(sounds) {
@@ -115,6 +139,12 @@ fun HomeScreen(
     }
     val fromTikTok = remember(sounds) {
         sounds.filter { it.source == SoundSource.TIKTOK }.take(4)
+    }
+    val brainSuggestions = remember(suggestions, sounds) {
+        suggestions.filter { suggestion ->
+            val id = suggestion.soundId
+            id != null && sounds.any { it.id == id }
+        }.take(3)
     }
 
     LazyColumn(
@@ -168,6 +198,23 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         onClick = onOpenLibrary,
                     )
+                }
+            }
+
+            if (brainSuggestions.isNotEmpty()) {
+                item { SectionTitle("Sonata Brain") }
+                items(brainSuggestions, key = { "brain-" + it.id }) { suggestion ->
+                    val target = suggestion.soundId?.let { id -> sounds.firstOrNull { it.id == id } }
+                    if (target != null) {
+                        BrainCard(
+                            suggestion = suggestion,
+                            onClick = {
+                                viewModel.acceptSuggestion(suggestion)
+                                viewModel.playAll(listOf(target), 0)
+                            },
+                            onDismiss = { viewModel.dismissSuggestion(suggestion.id) },
+                        )
+                    }
                 }
             }
 
@@ -331,6 +378,61 @@ private fun ContinueCard(sound: Sound, onClick: () -> Unit) {
                         modifier = Modifier.size(28.dp),
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BrainCard(
+    suggestion: Suggestion,
+    onClick: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val spacing = LocalSpacing.current
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    ) {
+        Row(
+            Modifier.padding(start = spacing.mdDp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = null,
+                modifier = Modifier.size(26.dp),
+            )
+            Column(
+                Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp),
+            ) {
+                Text(
+                    suggestion.headline,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    suggestion.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Dismiss suggestion",
+                    modifier = Modifier.size(18.dp),
+                )
             }
         }
     }

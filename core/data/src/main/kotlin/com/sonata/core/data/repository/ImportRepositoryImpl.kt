@@ -42,6 +42,7 @@ class ImportRepositoryImpl @Inject constructor(
         attempt: Int?,
         fullSongVerified: Boolean?,
         matchConfidence: Float?,
+        soundId: Long?,
     ) = withContext(io) {
         val existing = dao.get(jobId) ?: return@withContext
         dao.upsert(
@@ -55,6 +56,7 @@ class ImportRepositoryImpl @Inject constructor(
                 attempt = attempt ?: existing.attempt,
                 fullSongVerified = fullSongVerified ?: existing.fullSongVerified,
                 matchConfidence = matchConfidence ?: existing.matchConfidence,
+                soundId = soundId ?: existing.soundId,
             ),
         )
     }

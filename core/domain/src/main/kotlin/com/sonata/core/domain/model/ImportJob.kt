@@ -46,6 +46,7 @@ enum class ImportFailureKind(val label: String, val retryable: Boolean) {
     TRUNCATED_AUDIO("Audio was incomplete", true),
     NO_RELIABLE_MATCH("No verified full song", true),
     LOW_CONFIDENCE_MATCH("Full song match was not confident", true),
+    CHOSEN_TRACK_MISMATCH("The chosen recording did not match this clip", false),
     STORAGE("Not enough storage", false),
     CANCELLED("Import cancelled", false),
     UNKNOWN("Unexpected import error", true),

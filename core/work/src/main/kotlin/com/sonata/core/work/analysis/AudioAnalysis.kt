@@ -72,16 +72,22 @@ object AudioAnalysis {
         for (lag in minLag..maxLag) {
             var score = 0.0
             for (f in 0 until frames - lag) score += flux[f] * flux[f + lag]
+            // Normalise by the number of overlapping frames, otherwise the
+            // shortest lag wins simply because it has more pairs to add.
+            score /= (frames - lag).coerceAtLeast(1)
             if (score > bestScore) {
                 bestScore = score
                 bestLag = lag
             }
         }
-        val bpm = 60.0 / (bestLag / 100.0)
-        // Fold into the 70–190 range (double/half-time detection).
-        val folded = generateSequence(bpm) { if (it > 190) it / 2 else it }
-            .first { it in 70.0..190.0 }
-        return folded.roundToInt()
+        var bpm = 60.0 / (bestLag / 100.0)
+        // Fold into the 80–180 range. In particular, a strong 70 BPM
+        // autocorrelation peak is almost always the half-time pulse of a
+        // 140 BPM record; keeping it at 70 made the library and Camelot mix
+        // keys disagree by an octave.
+        while (bpm < 80.0) bpm *= 2.0
+        while (bpm > 180.0) bpm /= 2.0
+        return bpm.roundToInt()
     }
 
     /** Key estimate with mode and a simple confidence margin. */

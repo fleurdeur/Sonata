@@ -15,6 +15,7 @@ import com.sonata.core.extractor.tiktok.MediaDownloader
 import com.sonata.core.extractor.tiktok.TikTokApi
 import com.sonata.core.extractor.tiktok.TikTokVideo
 import com.sonata.core.work.analysis.AudioAnalysis
+import com.sonata.core.work.analysis.EffectProfiler
 import com.sonata.core.work.pipeline.AudioStore
 import com.sonata.core.work.pipeline.ImportFailureException
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -405,52 +406,14 @@ class TikTokPipeline @Inject constructor(
         tailRatio: Double,
         keywords: String,
         matched: AcousticMatcher.Match?,
-    ): EffectSpec {
-        // The matcher already measured speed and pitch against the correct part
-        // of the song. Do not run a second, differently-windowed estimate.
-        val speed = matched?.speed?.takeIf { matched.verified } ?: 1f
-        val sourceOffset = ((matched?.offsetMs ?: 0L).toFloat() * speed).coerceAtLeast(0f).toLong()
-        val start = (sourceOffset - 15_000L).coerceAtLeast(0L)
-        val end = (start + 60_000L).coerceAtMost(fullPcm.size.toLong() * 1000 / PcmTools.SAMPLE_RATE)
-        val from = (start * PcmTools.SAMPLE_RATE / 1000).toInt().coerceIn(0, fullPcm.size)
-        val to = (end * PcmTools.SAMPLE_RATE / 1000).toInt().coerceIn(from, fullPcm.size)
-        val analysisWindow = if (to - from >= PcmTools.SAMPLE_RATE * 4) {
-            fullPcm.copyOfRange(from, to)
-        } else {
-            fullPcm
-        }
-        val fullKey = AudioAnalysis.detectKey(analysisWindow, PcmTools.SAMPLE_RATE)
-        val semitones = PcmTools.semitoneDelta(fullKey, clipKey)
-        val expected = 12f * log2(speed)
-        val saysNightcore = keywords.contains("nightcore")
-        val measuredPitch = matched?.pitchSemitones ?: 0
-        val pitchAgrees = abs(measuredPitch.toFloat() - expected) <= 1.5f && abs(measuredPitch) >= 1
-        val saysSpedUp = keywords.contains("sped up") || keywords.contains("speed up")
-        val coupled = when {
-            speed == 1f -> false
-            saysNightcore -> true
-            pitchAgrees -> true
-            saysSpedUp && speed > 1.08f -> true
-            abs(semitones.toFloat() - expected) <= 1.2f && abs(semitones) >= 1 -> true
-            else -> false
-        }
-
-        val fullTail = PcmTools.reverbTailRatio(analysisWindow)
-        val extraTail = tailRatio - fullTail
-        val saysReverb = keywords.contains("reverb")
-        val reverb = when {
-            extraTail >= 0.22 -> 0.26f
-            extraTail >= 0.13 -> 0.16f
-            saysReverb && extraTail >= 0.04 -> 0.14f
-            else -> 0f
-        }
-        val bass = if (keywords.contains("bass boost") || keywords.contains("bass boosted")) {
-            3f
-        } else {
-            0f
-        }
-        return EffectSpec(speed = speed, pitchCoupled = coupled, reverbMix = reverb, bassDb = bass)
-    }
+    ): EffectSpec = EffectProfiler.profile(
+        clipKey = clipKey,
+        clipPcm = clipPcm,
+        fullPcm = fullPcm,
+        tailRatio = tailRatio,
+        keywords = keywords,
+        matched = matched,
+    )
 
     private fun trimSilence(pcm: ShortArray): ShortArray {
         val bounds = PcmTools.contentBounds(pcm)

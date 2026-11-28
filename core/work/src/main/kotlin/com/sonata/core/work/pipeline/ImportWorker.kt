@@ -1,11 +1,14 @@
 package com.sonata.core.work.pipeline
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.sonata.core.audio.render.AcousticMatcher
 import com.sonata.core.audio.render.PcmTools
+import com.sonata.core.audio.render.TrackRenderer
 import com.sonata.core.common.di.IoDispatcher
 import com.sonata.core.database.dao.SoundDao
 import com.sonata.core.database.entity.SoundEntity
@@ -18,10 +21,13 @@ import com.sonata.core.domain.model.CueKind
 import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.ImportRepository
 import com.sonata.core.domain.repository.LyricsRepository
+import com.sonata.core.extractor.bitchord.BitchordExtractor
+import com.sonata.core.extractor.bitchord.ResolveOutcome
 import com.sonata.core.extractor.provider.LinkResolverRegistry
 import com.sonata.core.extractor.tiktok.MediaDownloader
 import com.sonata.core.extractor.tiktok.TikTokUrls
 import com.sonata.core.work.analysis.AudioAnalysis
+import com.sonata.core.work.analysis.EffectProfiler
 import com.sonata.core.work.tiktok.TikTokPipeline
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -34,6 +40,8 @@ import java.security.MessageDigest
 import javax.net.ssl.SSLException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.withContext
 
 /**
@@ -56,6 +64,7 @@ class ImportWorker @AssistedInject constructor(
     private val audioStore: AudioStore,
     private val downloader: MediaDownloader,
     private val tiktokPipeline: TikTokPipeline,
+    private val extractor: BitchordExtractor,
     private val lyricsRepository: LyricsRepository,
     private val cueRepository: CueRepository,
     @IoDispatcher private val io: CoroutineDispatcher,
@@ -69,6 +78,9 @@ class ImportWorker @AssistedInject constructor(
         var currentStage = storedJob?.stage?.takeUnless { it.terminal } ?: ImportStage.QUEUED
         var currentTitle = storedJob?.title.orEmpty()
         val attempt = runAttemptCount + 1
+        var lastReportedAt = 0L
+        var lastReportedStage: ImportStage? = null
+        var lastReportedFraction = -1f
 
         suspend fun progress(
             stage: ImportStage,
@@ -79,9 +91,22 @@ class ImportWorker @AssistedInject constructor(
             diagnostics: String? = null,
             verified: Boolean? = null,
             confidence: Float? = null,
+            soundId: Long? = null,
         ) {
             if (title.isNotBlank()) currentTitle = title
+            val now = SystemClock.elapsedRealtime()
+            val stageChanged = stage != lastReportedStage
+            val quiet = error == null && failure == null && verified == null &&
+                soundId == null && fraction < 0.999f
+            if (quiet && !stageChanged && now - lastReportedAt < 250L &&
+                abs(fraction - lastReportedFraction) < 0.03f
+            ) {
+                return
+            }
             currentStage = stage
+            lastReportedAt = now
+            lastReportedStage = stage
+            lastReportedFraction = fraction
             runCatching {
                 importRepository.report(
                     jobId = jobId,
@@ -94,17 +119,29 @@ class ImportWorker @AssistedInject constructor(
                     attempt = attempt,
                     fullSongVerified = verified,
                     matchConfidence = confidence,
+                    soundId = soundId,
                 )
             }
         }
 
         try {
-            val result: Stored = when {
-                isLink && TikTokUrls.isTikTok(sourceUri) -> importTikTok(sourceUri, ::progress)
-                isLink -> importLink(sourceUri, ::progress)
-                else -> importLocal(sourceUri, ::progress)
+            val attachSoundId = inputData.getLong(KEY_ATTACH_SOUND_ID, 0L)
+            val result: Stored = if (attachSoundId > 0L) {
+                attachFullSong(
+                    soundId = attachSoundId,
+                    videoId = inputData.getString(KEY_ATTACH_VIDEO_ID).orEmpty(),
+                    artistOverride = inputData.getString(KEY_ATTACH_ARTIST),
+                    parentJobId = inputData.getString(KEY_PARENT_JOB_ID),
+                    progress = ::progress,
+                )
+            } else {
+                when {
+                    isLink && TikTokUrls.isTikTok(sourceUri) -> importTikTok(sourceUri, ::progress)
+                    isLink -> importLink(sourceUri, ::progress)
+                    else -> importLocal(sourceUri, ::progress)
+                }
             }
-            progress(ImportStage.DONE, 1f, result.title)
+            progress(ImportStage.DONE, 1f, result.title, soundId = result.soundId)
             Result.success(
                 workDataOf(
                     KEY_SOUND_ID to result.soundId,
@@ -226,6 +263,201 @@ class ImportWorker @AssistedInject constructor(
         // The import is safely in the library; only now discard source caches.
         track.cacheFiles.forEach { runCatching { it.delete() } }
         return stored
+    }
+
+    // ------------------------------------------------------- chosen full song
+
+    /**
+     * The honest fallback: the user picked a specific YouTube/YouTube Music
+     * recording. It is downloaded and checked against the clip before anything
+     * is replaced. Only a verified match is rendered with the measured edit.
+     */
+    private suspend fun attachFullSong(
+        soundId: Long,
+        videoId: String,
+        artistOverride: String?,
+        parentJobId: String?,
+        progress: suspend (
+            ImportStage,
+            Float,
+            String,
+            String?,
+            ImportFailureKind?,
+            String?,
+            Boolean?,
+            Float?,
+        ) -> Unit,
+    ): Stored {
+        if (videoId.length !in 6..20) {
+            throw ImportFailureException(ImportFailureKind.CHOSEN_TRACK_MISMATCH, "No recording was selected")
+        }
+        val sound = soundDao.getById(soundId)
+            ?: throw ImportFailureException(ImportFailureKind.SOURCE_UNAVAILABLE, "This sound is no longer in the library")
+        val clipPath = sound.clipFilePath?.takeIf { it.isNotBlank() } ?: sound.filePath
+        progress(ImportStage.FETCH_FULL_TRACK, 0.08f, "Opening your clip", null, null, null, null, null)
+        val clipPcm = audioStore.extractToPcm(clipPath)
+        if (clipPcm.size < PcmTools.SAMPLE_RATE * 3) {
+            throw ImportFailureException(ImportFailureKind.NO_AUDIO, "The saved clip is too short to verify")
+        }
+
+        progress(ImportStage.FETCH_FULL_TRACK, 0.18f, "Resolving the chosen recording", null, null, null, null, null)
+        val stream = runCatching { extractor.resolveStream(videoId) }.getOrNull()
+        val resolved = stream as? ResolveOutcome.Ok
+            ?: throw ImportFailureException(
+                when (stream) {
+                    is ResolveOutcome.AgeRestricted -> ImportFailureKind.SOURCE_UNAVAILABLE
+                    is ResolveOutcome.RegionBlocked -> ImportFailureKind.SOURCE_UNAVAILABLE
+                    else -> ImportFailureKind.SOURCE_UNAVAILABLE
+                },
+                when (stream) {
+                    is ResolveOutcome.AgeRestricted -> "That recording is age-restricted"
+                    is ResolveOutcome.RegionBlocked -> "That recording is not available in this region"
+                    is ResolveOutcome.Unavailable -> stream.reason
+                    else -> "That recording has no playable audio"
+                },
+            )
+        val cache = audioStore.cacheFile("attach_" + videoId + ".m4a")
+        if (!cache.isFile || cache.length() < 1_024L) {
+            progress(ImportStage.FETCH_FULL_TRACK, 0.22f, "Downloading the chosen recording", null, null, null, null, null)
+            runCatching {
+                downloader.download(
+                    url = resolved.url,
+                    destination = cache,
+                    onProgress = { fraction ->
+                        progress(
+                            ImportStage.FETCH_FULL_TRACK,
+                            0.22f + fraction * 0.22f,
+                            "Downloading the chosen recording",
+                            null, null, null, null, null,
+                        )
+                    },
+                    userAgent = resolved.client.userAgent,
+                    referer = "https://www.youtube.com/",
+                )
+            }.onFailure {
+                throw ImportFailureException(ImportFailureKind.NETWORK, "The chosen recording did not download", it)
+            }
+        }
+
+        progress(ImportStage.EXTRACT_AUDIO, 0.48f, "Decoding the full song", null, null, null, null, null)
+        val fullPcm = runCatching { audioStore.extractToPcm(cache.absolutePath) }.getOrElse {
+            cache.delete()
+            throw ImportFailureException(ImportFailureKind.EXTRACTION_FAILED, "Could not decode the chosen recording", it)
+        }
+        if (fullPcm.size < PcmTools.SAMPLE_RATE * 45) {
+            cache.delete()
+            throw ImportFailureException(ImportFailureKind.CHOSEN_TRACK_MISMATCH, "That upload is not a full song")
+        }
+
+        progress(ImportStage.ALIGN_EDIT, 0.62f, "Checking the recording against your clip", null, null, null, null, null)
+        val proof = runCatching { AcousticMatcher.match(clipPcm, fullPcm) }.getOrNull()
+        if (proof == null || !proof.verified) {
+            val confidence = proof?.score ?: 0f
+            cache.delete()
+            throw ImportFailureException(
+                ImportFailureKind.CHOSEN_TRACK_MISMATCH,
+                "The chosen recording did not pass audio matching (" +
+                    (confidence * 100).roundToInt() + "%). Pick another result.",
+            )
+        }
+
+        progress(ImportStage.ALIGN_EDIT, 0.74f, "Measuring the edit", null, null, null, null, null)
+        val keywords = listOfNotNull(
+            sound.tags.replace('|', ' ').takeIf { it.isNotBlank() },
+            sound.tiktokCaption,
+            sound.tiktokSoundName,
+        ).joinToString(" ").lowercase()
+        val effect = EffectProfiler.profile(
+            clipKey = AudioAnalysis.detectKey(clipPcm, PcmTools.SAMPLE_RATE),
+            clipPcm = clipPcm,
+            fullPcm = fullPcm,
+            tailRatio = PcmTools.reverbTailRatio(clipPcm),
+            keywords = keywords,
+            matched = proof,
+        )
+        val rendered = TrackRenderer.render(
+            source = fullPcm,
+            spec = effect,
+            targetDurationMs = null,
+            loopClip = false,
+        )
+
+        progress(ImportStage.ENCODE_AAC, 0.86f, "Encoding the full song", null, null, null, null, null)
+        val destination = audioStore.newSoundFile("m4a")
+        val written = PcmFileWriter.write(rendered, PcmTools.SAMPLE_RATE, destination)
+        val durationMs = rendered.size.toLong() * 1_000L / PcmTools.SAMPLE_RATE
+        val bpm = AudioAnalysis.detectBpm(rendered, PcmTools.SAMPLE_RATE)
+        val key = AudioAnalysis.detectKeyEstimate(rendered, PcmTools.SAMPLE_RATE).let {
+            MusicalKey.fromPitchClass(it.pitchClass, minor = it.minor && it.confidence >= 0.04f)
+        }
+        val clipFile = sound.clipFilePath?.takeIf { it.isNotBlank() } ?: sound.filePath
+        val oldFull = sound.fullSongFilePath?.takeIf { it.isNotBlank() }
+        val oldTags = sound.tags.split('|').filterNot { tag ->
+            tag == "clip only" || tag == "full song" || tag == "verified" ||
+                tag == "youtube" || tag == "tiktok" || tag.startsWith("match ") ||
+                tag == "slowed" || tag == "sped up" || tag == "nightcore" ||
+                tag == "reverb" || tag == "bass boosted" ||
+                Regex("""^\d+(?:\.\d+)?x$""").matches(tag)
+        }
+        val newTags = (oldTags + buildList {
+            add("full song")
+            add("verified")
+            add("youtube")
+            add("tiktok")
+            effect.labels().forEach { add(it.lowercase()) }
+            if (abs(effect.speed - 1f) >= 0.01f) {
+                val value = (effect.speed * 100f).roundToInt() / 100f
+                add(value.toString().removeSuffix(".0") + "x")
+            }
+            add("match " + (proof.score * 100).roundToInt().coerceIn(0, 100) + "%")
+        }).distinct()
+        val artist = artistOverride
+            ?.replace(Regex("(?i)\\s*[-–—]\\s*topic$"), "")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        soundDao.updateFullSong(
+            id = soundId,
+            filePath = written.absolutePath,
+            fullSongFilePath = written.absolutePath,
+            clipFilePath = clipFile,
+            offsetMs = proof.offsetMs,
+            confidence = proof.score,
+            speed = effect.speed,
+            durationMs = durationMs,
+            sampleRate = PcmTools.SAMPLE_RATE,
+            bpm = bpm,
+            key = key.name,
+            tags = newTags.joinToString("|"),
+            artist = artist,
+            waveformJson = AudioAnalysis.waveform(rendered).toList().encodeWaveform(),
+            loudnessLufs = AudioAnalysis.loudnessLufs(rendered),
+        )
+        if (oldFull != null && oldFull != written.absolutePath) {
+            runCatching { File(oldFull).delete() }
+        }
+        cache.delete()
+        if (proof.offsetMs > 0L) {
+            runCatching {
+                cueRepository.ensure(
+                    soundId = soundId,
+                    positionMs = proof.offsetMs,
+                    label = "TikTok moment",
+                    kind = CueKind.MEMORY,
+                )
+            }
+        }
+        parentJobId?.takeIf { it.isNotBlank() }?.let { parent ->
+            runCatching {
+                importRepository.report(
+                    jobId = parent,
+                    stage = ImportStage.DONE,
+                    progress = 1f,
+                    fullSongVerified = true,
+                    matchConfidence = proof.score,
+                )
+            }
+        }
+        return Stored(soundId, sound.title, duplicate = false)
     }
 
     // -------------------------------------------------------------- links
@@ -526,6 +758,8 @@ class ImportWorker @AssistedInject constructor(
             ImportFailureKind.TRUNCATED_AUDIO -> "The audio ended early. Retry to finish the download."
             ImportFailureKind.NO_RELIABLE_MATCH -> "No reliable full song was found; the real clip was kept."
             ImportFailureKind.LOW_CONFIDENCE_MATCH -> "The full song match was not confident; the real clip was kept."
+            ImportFailureKind.CHOSEN_TRACK_MISMATCH -> t.message?.take(160)
+                ?: "The chosen recording did not match this clip."
             ImportFailureKind.STORAGE -> "There is not enough free storage for this import."
             ImportFailureKind.CANCELLED -> "Import cancelled."
             ImportFailureKind.UNKNOWN -> t.message?.take(160)?.takeIf { it.isNotBlank() } ?: "Import failed."
@@ -573,6 +807,10 @@ class ImportWorker @AssistedInject constructor(
         const val KEY_SOURCE_URI = "sourceUri"
         const val KEY_IS_LINK = "isLink"
         const val KEY_SOUND_ID = "soundId"
+        const val KEY_ATTACH_SOUND_ID = "attachSoundId"
+        const val KEY_ATTACH_VIDEO_ID = "attachVideoId"
+        const val KEY_ATTACH_ARTIST = "attachArtist"
+        const val KEY_PARENT_JOB_ID = "parentJobId"
         const val KEY_DUPLICATE = "duplicate"
         const val KEY_TRIM_START = "trimStart"
         const val KEY_TRIM_END = "trimEnd"

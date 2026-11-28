@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -110,6 +111,7 @@ import com.sonata.core.domain.repository.CueRepository
 import com.sonata.core.domain.repository.LyricsRepository
 import com.sonata.core.domain.repository.SoundRepository
 import com.sonata.core.media.connection.PlayerConnection
+import com.sonata.feature.ingest.FullSongPickerDialog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -205,6 +207,23 @@ class NowPlayingViewModel @Inject constructor(
     fun setLyricsOffset(soundId: Long, offsetMs: Long) = viewModelScope.launch {
         lyricsRepository.setOffset(soundId, offsetMs)
         _lyrics.value = _lyrics.value?.copy(offsetMs = offsetMs.coerceIn(-2_000L, 2_000L))
+    }
+
+    /**
+     * The attach job runs in the background. Watch the row briefly so the open
+     * player becomes the verified full song without asking for a restart.
+     */
+    fun awaitFullSong(id: Long, onReady: (Sound) -> Unit) {
+        viewModelScope.launch {
+            repeat(180) {
+                delay(1_000)
+                val updated = soundRepository.get(id) ?: return@launch
+                if (updated.hasVariants && updated.fullSongFilePath != null) {
+                    onReady(updated)
+                    return@launch
+                }
+            }
+        }
     }
 
     fun switchVariant(sound: Sound, target: PlaybackVariant, onReady: (Sound) -> Unit) {
@@ -331,6 +350,8 @@ fun NowPlayingScreen(
     val context = LocalContext.current
 
     var showLyrics by rememberSaveable { mutableStateOf(false) }
+    var pickerOpen by remember { mutableStateOf(false) }
+    var pickerQueued by remember { mutableStateOf(false) }
     var sleepMinutes by remember { mutableIntStateOf(0) }
     var abStart by remember { mutableStateOf<Long?>(null) }
     var abEnd by remember { mutableStateOf<Long?>(null) }
@@ -385,7 +406,35 @@ fun NowPlayingScreen(
                     sound?.let { viewModel.toggleFavorite(it.id, it.id in favorites) }
                 },
                 onExport = { sound?.let { exportSound(context, it) } },
+                onFindFullSong = if (sound != null && !sound.hasVariants &&
+                    (sound.tiktokMusicId != null ||
+                        sound.tags.any {
+                            it.equals("clip only", ignoreCase = true) || it.equals("tiktok", ignoreCase = true)
+                        })
+                ) {
+                    { pickerOpen = true }
+                } else {
+                    null
+                },
             )
+            if (pickerOpen && sound != null) {
+                FullSongPickerDialog(
+                    soundId = sound.id,
+                    parentJobId = null,
+                    fallbackQuery = sound.title,
+                    onQueued = { pickerQueued = true },
+                    onDismiss = {
+                        pickerOpen = false
+                        if (pickerQueued) {
+                            val id = sound.id
+                            viewModel.awaitFullSong(id) { updated ->
+                                player.replaceCurrent(updated, player.state.value.positionMs)
+                            }
+                        }
+                        pickerQueued = false
+                    },
+                )
+            }
 
             if (sound != null && sound.hasVariants) {
                 VariantSwitcher(
@@ -605,6 +654,7 @@ private fun NowPlayingTopBar(
     onToggleLyrics: () -> Unit,
     onToggleFavorite: () -> Unit,
     onExport: () -> Unit,
+    onFindFullSong: (() -> Unit)? = null,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -638,6 +688,11 @@ private fun NowPlayingTopBar(
                 contentDescription = if (lyricsActive) "Show player" else "Show lyrics",
                 tint = if (lyricsActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        onFindFullSong?.let { find ->
+            IconButton(onClick = find) {
+                Icon(Icons.Filled.Search, contentDescription = "Choose the full song")
+            }
         }
         IconButton(onClick = onExport, enabled = sound != null) {
             Icon(

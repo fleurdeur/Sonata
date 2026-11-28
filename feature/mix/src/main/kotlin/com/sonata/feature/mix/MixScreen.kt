@@ -60,7 +60,7 @@ class MixViewModel @Inject constructor(
 
     fun play(order: List<Sound>, index: Int = 0) = viewModelScope.launch {
         if (order.isEmpty()) return@launch
-        player.play(order, index)
+        player.play(order, index, transitionFade = true)
         soundRepository.incrementPlayCount(order[index].id)
     }
 }

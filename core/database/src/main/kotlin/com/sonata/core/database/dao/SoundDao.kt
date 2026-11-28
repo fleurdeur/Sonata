@@ -62,6 +62,47 @@ interface SoundDao {
     @Query("UPDATE sounds SET coverPath = :coverPath WHERE id = :id")
     suspend fun updateCover(id: Long, coverPath: String?)
 
+    @Query(
+        """
+        UPDATE sounds SET
+            filePath = :filePath,
+            fullSongFilePath = :fullSongFilePath,
+            clipFilePath = :clipFilePath,
+            matchOffsetMs = :offsetMs,
+            matchConfidence = :confidence,
+            effectSpeed = :speed,
+            activeVariant = 'FULL',
+            durationMs = :durationMs,
+            sampleRate = :sampleRate,
+            channels = 1,
+            bpm = :bpm,
+            key = :key,
+            tags = :tags,
+            artist = COALESCE(:artist, artist),
+            waveformJson = :waveformJson,
+            loudnessLufs = :loudnessLufs,
+            importStatus = 'READY'
+        WHERE id = :id
+        """
+    )
+    suspend fun updateFullSong(
+        id: Long,
+        filePath: String,
+        fullSongFilePath: String,
+        clipFilePath: String?,
+        offsetMs: Long,
+        confidence: Float,
+        speed: Float,
+        durationMs: Long,
+        sampleRate: Int,
+        bpm: Int,
+        key: String,
+        tags: String,
+        artist: String?,
+        waveformJson: String,
+        loudnessLufs: Float,
+    )
+
     @Query("SELECT DISTINCT tags FROM sounds WHERE tags != ''")
     suspend fun allTags(): List<String>
 

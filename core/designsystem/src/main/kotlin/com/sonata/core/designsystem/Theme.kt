@@ -157,17 +157,47 @@ fun SonataTheme(
     val context = LocalContext.current
     val scheme: ColorScheme = if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val dynamic = if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        if (themeMode == ThemeMode.PURE_BLACK) {
-            dynamic.copy(background = Color.Black, surface = Color.Black)
-        } else {
-            dynamic
-        }
+        // Material You supplies the neutrals, but the accent the user picked
+        // still has to win. Pure black also has to reach every surface
+        // container, not only background/surface.
+        withAccent(dynamic, dark, themeMode == ThemeMode.PURE_BLACK, preset)
     } else {
         colorSchemeFor(dark, themeMode == ThemeMode.PURE_BLACK, preset)
     }
     CompositionLocalProvider(LocalSpacing provides Spacing(), LocalRadius provides Radius()) {
         MaterialTheme(colorScheme = scheme, typography = SonataTypography(), content = content)
     }
+}
+
+/**
+ * Re-applies the chosen accent to any scheme (including a Material You one)
+ * and, for pure black, flattens every tonal container to neutral black.
+ */
+private fun withAccent(
+    base: ColorScheme,
+    dark: Boolean,
+    pureBlack: Boolean,
+    accent: AccentPreset,
+): ColorScheme {
+    val primary = if (dark) accent.dark else accent.light
+    val surface = if (pureBlack) Color.Black else base.surface
+    val background = if (pureBlack) Color.Black else base.background
+    val container = if (pureBlack) Color(0xFF0A0A0A) else base.surfaceContainer
+    return base.copy(
+        primary = primary,
+        onPrimary = if (dark) accent.darkOn else accent.lightOn,
+        primaryContainer = lerp(container, primary, if (dark) 0.24f else 0.16f),
+        onPrimaryContainer = lerp(primary, if (dark) Color.White else Color.Black, 0.55f),
+        secondary = if (dark) lerp(primary, Color.Gray, 0.55f) else lerp(primary, Color.Gray, 0.45f),
+        inversePrimary = if (dark) accent.light else accent.dark,
+        background = background,
+        surface = surface,
+        surfaceContainer = container,
+        surfaceContainerLow = if (pureBlack) Color(0xFF050505) else base.surfaceContainerLow,
+        surfaceContainerLowest = if (pureBlack) Color.Black else base.surfaceContainerLowest,
+        surfaceContainerHigh = if (pureBlack) Color(0xFF141414) else base.surfaceContainerHigh,
+        surfaceContainerHighest = if (pureBlack) Color(0xFF1C1C1C) else base.surfaceContainerHighest,
+    )
 }
 
 /** Picks the stored accent preset; tolerates colours saved by older builds. */

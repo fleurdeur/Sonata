@@ -55,6 +55,11 @@ class PlayerConnection @Inject constructor(
 
     private var abLoopStart: Long? = null
     private var abLoopEnd: Long? = null
+    private var transitionFade = false
+    private var manualFade = false
+    private var fadingOut = false
+    private var fadeInUntil = 0L
+    private var lastItemIndex = -1
 
     suspend fun connect() = withContext(Dispatchers.Main) {
         if (controller != null) return@withContext
@@ -103,13 +108,17 @@ class PlayerConnection @Inject constructor(
             if (_state.value.positionMs != pos) {
                 _state.value = _state.value.copy(positionMs = pos)
             }
+            applyTransitionFade(player, pos)
             delay(200)
         }
     }
 
-    fun play(sounds: List<Sound>, startIndex: Int = 0) {
+    fun play(sounds: List<Sound>, startIndex: Int = 0, transitionFade: Boolean = false) {
         if (sounds.isEmpty()) return
         val player = controller ?: return
+        this.transitionFade = transitionFade
+        lastItemIndex = -1
+        player.volume = 1f
         queuedSounds = sounds
         player.setMediaItems(
             sounds.map { it.toMediaItem() },
@@ -122,6 +131,8 @@ class PlayerConnection @Inject constructor(
 
     fun playSingleLooped(sound: Sound) {
         val player = controller ?: return
+        transitionFade = false
+        player.volume = 1f
         queuedSounds = listOf(sound)
         player.setMediaItem(sound.toMediaItem())
         player.repeatMode = Player.REPEAT_MODE_ONE // infinite, gapless via ExoPlayer loop
@@ -148,14 +159,53 @@ class PlayerConnection @Inject constructor(
             player.pause()
             return
         }
-        val startVolume = player.volume
-        val steps = (durationMs / 20L).toInt().coerceAtLeast(4)
-        for (i in 1..steps) {
-            player.volume = startVolume * (1f - i.toFloat() / steps)
-            delay(20L)
+        manualFade = true
+        try {
+            val startVolume = player.volume
+            val steps = (durationMs / 20L).toInt().coerceAtLeast(4)
+            for (i in 1..steps) {
+                player.volume = startVolume * (1f - i.toFloat() / steps)
+                delay(20L)
+            }
+            player.pause()
+            player.volume = startVolume
+        } finally {
+            manualFade = false
         }
-        player.pause()
-        player.volume = startVolume
+    }
+
+    /**
+     * Optional mix transition: a short fade at the end of each item and a fade
+     * back in on the next one. It never changes tempo or overlaps two decoders,
+     * so it also works offline and on every device.
+     */
+    private fun applyTransitionFade(player: Player, positionMs: Long) {
+        if (!transitionFade || manualFade) return
+        val index = player.currentMediaItemIndex
+        if (index != lastItemIndex) {
+            lastItemIndex = index
+            if (index > 0) fadeInUntil = System.currentTimeMillis() + 700L
+        }
+        if (!player.isPlaying) return
+        val duration = player.duration
+        val hasNext = player.hasNextMediaItem() || player.repeatMode == Player.REPEAT_MODE_ALL
+        val remaining = duration - positionMs
+        if (duration > 0 && hasNext && remaining in 0..2_500L) {
+            player.volume = (remaining / 2_500f).coerceIn(0.05f, 1f)
+            fadingOut = true
+            return
+        }
+        if (fadingOut) {
+            fadingOut = false
+            player.volume = 1f
+        }
+        val now = System.currentTimeMillis()
+        if (now < fadeInUntil) {
+            val fraction = 1f - (fadeInUntil - now) / 700f
+            player.volume = (0.15f + fraction.coerceIn(0f, 1f) * 0.85f)
+        } else if (player.volume < 1f) {
+            player.volume = 1f
+        }
     }
 
     fun resumeAfterStop() {
